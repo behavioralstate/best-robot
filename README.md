@@ -71,7 +71,11 @@ rosbridge that doesn't answer within fifteen seconds, stops it with the reason. 
   `SkillCancelRefused`.
 - **Each topic as a query**, `get-<name>`: the latest message and when it arrived, both null until one has.
 
-A lost rosbridge is reconnected a second later. A run it cut short ends in `CommandFailed`, since the robot may still
+Each integer field is held to its ROS width, so a goal number the type cannot carry is refused with a 400 rather than
+wrapped. A float the robot sends may be null: that is how rosbridge writes NaN and infinity.
+
+A lost rosbridge is reconnected a second later; one that stops answering without closing its socket (a robot whose
+power or cable was pulled) is given up after six silent seconds. A run it cut short ends in `CommandFailed`, since the robot may still
 be running it. A command the door was stopped during also ends in `CommandFailed` at the next start, and is never sent
 again: a goal sent twice moves a robot twice.
 
