@@ -17,6 +17,12 @@ hold. It serves http on loopback only. The envelope is proven in simulation alon
 robot's own limits and its emergency stop in place, since it bounds the goals and what the robot reports, not the
 path the robot's planner takes.
 
+An agent with nothing but the person's sentence and the published connector drove the simulated robot from the
+manifest alone: it signed in, read where the robot was, navigated, was refused a goal outside the fence and went to
+the nearest admitted place instead, cancelled a navigation, and read back what it had done.
+[acceptance/drive-from-the-manifest.md](acceptance/drive-from-the-manifest.md) is the record of that run, with its
+transcript.
+
 ## Try it
 
 ```bash
