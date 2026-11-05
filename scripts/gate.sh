@@ -92,7 +92,8 @@ lane_rosbridge() (
     sleep 0.5
   done
   [[ "$logs" == *"testbed ready"* ]] || { echo "the testbed did not come up:"; echo "$logs" | tail -20; exit 1; }
-  BEST_ROBOT_TEST_ROSBRIDGE=ws://127.0.0.1:9091 cargo test -p rosbridge -- --ignored
+  BEST_ROBOT_TEST_ROSBRIDGE=ws://127.0.0.1:9091 BEST_ROBOT_TEST_CONTAINER="$container" \
+    cargo test -p rosbridge -- --ignored
   base=http://127.0.0.1:7883
   export BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG=testbed/rosbridge/best-robot.toml
   export BEST_ROBOT_DATA="$data" BEST_ROBOT_LISTEN=127.0.0.1:7883

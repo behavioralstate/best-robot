@@ -45,12 +45,12 @@ impl Robot for Fake {
     }
 }
 
-/// How a fake skill behaves: the feedback it sends, then how it ends. `held` runs wait for a cancel instead, and end
-/// [`Outcome::Canceled`] with a null result.
+/// How a fake skill behaves: the feedback it sends, then how it ends, or that the robot stopped answering. `held` runs
+/// wait for a cancel instead, and end [`Outcome::Canceled`] with a null result.
 #[derive(Clone)]
 pub struct Script {
     pub feedback: Vec<Value>,
-    pub outcome: Outcome,
+    pub end: Result<Outcome, Unreachable>,
     pub held: bool,
 }
 
@@ -76,7 +76,18 @@ impl FakeSkills {
     pub fn ends(mut self, skill: &str, feedback: Vec<Value>, outcome: Outcome) -> Self {
         let script = Script {
             feedback,
-            outcome,
+            end: Ok(outcome),
+            held: false,
+        };
+        self.scripts.insert(skill.into(), script);
+        self
+    }
+
+    /// `skill` sends `feedback`, then the robot stops answering, as when its rosbridge is lost mid-run.
+    pub fn lost(mut self, skill: &str, feedback: Vec<Value>) -> Self {
+        let script = Script {
+            feedback,
+            end: Err(Unreachable("the connection was lost while it ran".into())),
             held: false,
         };
         self.scripts.insert(skill.into(), script);
@@ -87,7 +98,7 @@ impl FakeSkills {
     pub fn held(mut self, skill: &str) -> Self {
         let script = Script {
             feedback: vec![],
-            outcome: Outcome::Canceled(Value::Null),
+            end: Ok(Outcome::Canceled(Value::Null)),
             held: true,
         };
         self.scripts.insert(skill.into(), script);
@@ -120,7 +131,7 @@ impl Skills for FakeSkills {
             cancelled.notified().await;
         }
         self.running.lock().unwrap().remove(run);
-        Ok(script.outcome.clone())
+        script.end.clone()
     }
 
     async fn cancel(&self, run: &str) -> Result<bool, Unreachable> {

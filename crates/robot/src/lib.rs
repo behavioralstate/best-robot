@@ -56,6 +56,6 @@ pub struct Pose {
 }
 
 /// The robot did not answer; the reason says what was tried.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 #[error("the robot did not answer: {0}")]
 pub struct Unreachable(pub String);

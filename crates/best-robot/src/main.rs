@@ -79,8 +79,9 @@ fn serve(settings: Settings) {
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&format!("cannot start: {e}")));
     runtime.block_on(async {
         let parts = parts(&settings.robot).await.unwrap_or_else(|why| fail(&why));
+        let description = surface::describe(&parts);
         let catalogue = surface::catalogue(parts).unwrap_or_else(|why| fail(&why));
-        let door = door::open(&settings, catalogue).unwrap_or_else(|e| {
+        let door = door::open(&settings, &description, catalogue).unwrap_or_else(|e| {
             fail(&format!(
                 "cannot keep the door's data in {}: {e}",
                 settings.data.display()

@@ -71,7 +71,7 @@ mod tests {
             skills: None,
             topics: None,
         };
-        let opened = door::open(&settings, crate::surface::catalogue(parts).unwrap()).unwrap();
+        let opened = door::open(&settings, "test", crate::surface::catalogue(parts).unwrap()).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let served = tokio::spawn(door::serve(listener, opened, async {
             stopped.await.ok();

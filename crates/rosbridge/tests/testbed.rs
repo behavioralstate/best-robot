@@ -5,36 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use robot::{Outcome, Skills, Topics};
-use rosbridge::{Config, Rosbridge};
+use rosbridge::Rosbridge;
+
+mod common;
+use common::{config, testbed};
 use serde_json::{json, Value};
-
-fn config(skill_type: &str) -> Config {
-    let url = std::env::var("BEST_ROBOT_TEST_ROSBRIDGE").unwrap_or_else(|_| "ws://127.0.0.1:9091".into());
-    Config::parse(&format!(
-        r#"
-rosbridge = "{url}"
-[[skills]]
-name = "fibonacci"
-action = "/fibonacci"
-type = "{skill_type}"
-description = "Computes a Fibonacci sequence of the given order."
-[[topics]]
-name = "battery"
-topic = "/battery_state"
-type = "sensor_msgs/msg/BatteryState"
-description = "The battery's state."
-"#
-    ))
-    .unwrap()
-}
-
-async fn testbed() -> Arc<Rosbridge> {
-    Arc::new(
-        Rosbridge::connect(config("example_interfaces/action/Fibonacci"))
-            .await
-            .unwrap(),
-    )
-}
 
 async fn run(rb: &Rosbridge, run: &str, order: i64) -> (Outcome, Vec<Value>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -61,7 +36,10 @@ async fn the_skill_and_topic_schemas_come_from_rosapi() {
     assert_eq!(skill.result["properties"]["sequence"]["type"], "array");
     assert_eq!(skill.feedback["properties"]["sequence"]["items"]["type"], "integer");
     let topic = &rb.topics()[0];
-    assert_eq!(topic.message["properties"]["percentage"]["type"], "number");
+    assert_eq!(
+        topic.message["properties"]["percentage"]["type"],
+        json!(["number", "null"])
+    );
 }
 
 #[tokio::test]

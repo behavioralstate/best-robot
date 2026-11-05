@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use client::Client;
 pub use config::Config;
+use schema::Way;
 
 /// How long the door waits for rosbridge at start.
 const CONNECT_WITHIN: Duration = Duration::from_secs(15);
@@ -52,9 +53,9 @@ impl Rosbridge {
             skills.push(SkillSpec {
                 name: s.name.clone(),
                 description: s.description.clone(),
-                goal: describe(&client, "/rosapi/action_goal_details", &s.action_type).await?,
-                feedback: describe(&client, "/rosapi/action_feedback_details", &s.action_type).await?,
-                result: describe(&client, "/rosapi/action_result_details", &s.action_type).await?,
+                goal: describe(&client, "/rosapi/action_goal_details", &s.action_type, Way::In).await?,
+                feedback: describe(&client, "/rosapi/action_feedback_details", &s.action_type, Way::Out).await?,
+                result: describe(&client, "/rosapi/action_result_details", &s.action_type, Way::Out).await?,
             });
         }
         let mut topics = Vec::new();
@@ -62,7 +63,7 @@ impl Rosbridge {
             topics.push(TopicSpec {
                 name: t.name.clone(),
                 description: t.description.clone(),
-                message: describe(&client, "/rosapi/message_details", &t.message_type).await?,
+                message: describe(&client, "/rosapi/message_details", &t.message_type, Way::Out).await?,
             });
         }
         Ok(Self {
@@ -80,7 +81,7 @@ impl Rosbridge {
     }
 }
 
-async fn describe(client: &Client, service: &str, ros_type: &str) -> Result<Value, Unreachable> {
+async fn describe(client: &Client, service: &str, ros_type: &str, way: Way) -> Result<Value, Unreachable> {
     let values = client
         .call(service, json!({ "type": ros_type }))
         .await?
@@ -90,7 +91,7 @@ async fn describe(client: &Client, service: &str, ros_type: &str) -> Result<Valu
             "rosapi described {ros_type} in a shape this door does not read: {e}"
         ))
     })?;
-    schema::of(&typedefs).map_err(|why| Unreachable(format!("{ros_type}: {why}")))
+    schema::of(&typedefs, way).map_err(|why| Unreachable(format!("{ros_type}: {why}")))
 }
 
 #[async_trait]
@@ -100,18 +101,18 @@ impl Skills for Rosbridge {
     }
 
     async fn run(&self, run: &str, skill: &str, goal: Value, progress: Progress) -> Result<Outcome, Unreachable> {
-        let Some((action, action_type)) = self.actions.get(skill) else {
+        let (Some((action, action_type)), Some(spec)) =
+            (self.actions.get(skill), self.skills.iter().find(|s| s.name == skill))
+        else {
             return Ok(Outcome::Refused(format!("no skill {skill} is configured")));
         };
         let send = json!({ "op": "send_action_goal", "id": run, "action": action, "action_type": action_type,
-            "args": goal, "feedback": true });
+            "args": schema::integers(goal, &spec.goal), "feedback": true });
         let mut answers = self.client.open(run, send)?;
         self.runs.lock().unwrap().insert(run.into(), action.clone());
         let end = loop {
             let Some(answer) = answers.recv().await else {
-                break Err(Unreachable(format!(
-                    "lost rosbridge while {skill} ran; the robot may still be running it"
-                )));
+                break Err(Unreachable(format!("the connection was lost while {skill} ran")));
             };
             match answer["op"].as_str() {
                 Some("action_feedback") => progress(answer["values"].clone()),

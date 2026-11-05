@@ -5,13 +5,20 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
 use robot::{Snapshot, Unreachable};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
+
+/// How long one connection attempt may take.
+const CONNECT_FOR: Duration = Duration::from_secs(5);
+/// How often the socket is pinged.
+const PING_EVERY: Duration = Duration::from_secs(2);
+/// How long rosbridge may send nothing, not even a pong, before the socket is given up.
+const SILENT_FOR: Duration = Duration::from_secs(6);
 
 pub struct Client {
     url: String,
@@ -64,10 +71,14 @@ impl Client {
     }
 
     pub fn send(&self, message: Value) -> Result<(), Unreachable> {
+        self.send_raw(Message::text(message.to_string()))
+    }
+
+    fn send_raw(&self, message: Message) -> Result<(), Unreachable> {
         let out = self.out.lock().unwrap();
         out.as_ref()
-            .and_then(|o| o.send(Message::text(message.to_string())).ok())
-            .ok_or_else(|| Unreachable(format!("not connected to rosbridge at {}", self.url)))
+            .and_then(|o| o.send(message).ok())
+            .ok_or_else(|| Unreachable("the door has no connection to it right now".into()))
     }
 
     /// Calls a ROS service and returns its values, or why it failed.
@@ -95,7 +106,8 @@ impl Client {
 
     async fn keep(self: Arc<Self>) {
         loop {
-            match tokio_tungstenite::connect_async(self.url.as_str()).await {
+            let attempt = tokio::time::timeout(CONNECT_FOR, tokio_tungstenite::connect_async(self.url.as_str())).await;
+            match attempt.unwrap_or_else(|_| Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)) {
                 Ok((socket, _)) => {
                     tracing::info!(url = %self.url, "connected to rosbridge");
                     self.serve(socket).await;
@@ -119,18 +131,40 @@ impl Client {
         }
         *self.out.lock().unwrap() = Some(tx);
         self.connected.send_replace(true);
-        let writer = tokio::spawn(async move {
+        let mut writer = tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
                 if sink.send(m).await.is_err() {
                     break;
                 }
             }
         });
-        while let Some(Ok(message)) = stream.next().await {
-            if let Message::Text(text) = message {
-                if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                    self.route(v);
+        // A socket whose far end vanished (a powered-off robot, a pulled cable) never closes by itself: it is pinged,
+        // and given up once nothing at all has come back for a while, so runs waiting on it are told.
+        let mut ping = tokio::time::interval(PING_EVERY);
+        let mut heard = Instant::now();
+        loop {
+            tokio::select! {
+                _ = ping.tick() => {
+                    if heard.elapsed() > SILENT_FOR {
+                        tracing::warn!(url = %self.url, "rosbridge went silent");
+                        break;
+                    }
+                    if self.send_raw(Message::Ping(Default::default())).is_err() {
+                        break;
+                    }
                 }
+                _ = &mut writer => break,
+                next = stream.next() => match next {
+                    Some(Ok(message)) => {
+                        heard = Instant::now();
+                        if let Message::Text(text) = message {
+                            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                                self.route(v);
+                            }
+                        }
+                    }
+                    _ => break,
+                },
             }
         }
         self.connected.send_replace(false);

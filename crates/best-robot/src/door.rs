@@ -13,18 +13,16 @@ use crate::settings::Settings;
 /// The service key in the manifest, and the `source` of every event.
 const SERVICE: &str = "io.best.agents";
 
-const DESCRIPTION: &str =
-    "A robot: its state and what it last said, read by query; its skills, sent as commands, their runs told as events.";
-
-/// The door over `catalogue`, with what a run before a restart left unfinished closed as failed.
-pub fn open(settings: &Settings, catalogue: Catalogue) -> std::io::Result<Door> {
+/// The door over `catalogue`, described as `description`, with what a run before a restart left unfinished closed as
+/// failed.
+pub fn open(settings: &Settings, description: &str, catalogue: Catalogue) -> std::io::Result<Door> {
     let approver = OwnerApprover::open(&settings.data)?;
     let auth = Auth::open(&settings.data, &settings.endpoint, Box::new(approver))?;
     let log = EventLog::open(&settings.data)?;
     let door = Door::new(
         &settings.endpoint,
         SERVICE,
-        DESCRIPTION,
+        description,
         catalogue,
         Arc::new(log),
         Arc::new(auth),
@@ -41,7 +39,7 @@ fn settle(door: &Door) {
         tracing::warn!(command = %e.r#type, id = %e.id, "closing a command the door stopped during");
         door.emitter(&e.effective_correlation())
             .with_key(&format!("{}:{}", owed.sender, e.id))
-            .emit("CommandFailed", json!({ "type": e.r#type, "reason": "the door stopped while this ran, so how it ended is not known and it is not sent again: read the robot's state, then send it again if it is still wanted" }));
+            .emit("CommandFailed", json!({ "type": e.r#type, "reason": "the door stopped while this ran, so how it ended is not known and it is not sent again: read what the robot reports, then send it again under a new command id if it is still wanted" }));
     }
 }
 
@@ -81,8 +79,21 @@ mod tests {
             .unwrap();
             log.accept_command("sender", "c1", "hash", "c1", &command);
         }
-        let door = open(&settings, Catalogue::new()).unwrap();
+        let skills = Arc::new(robot::FakeSkills::new(vec![robot::SkillSpec {
+            name: "fibonacci".into(),
+            description: "Counts.".into(),
+            goal: json!({ "type": "object" }),
+            feedback: json!({ "type": "object" }),
+            result: json!({ "type": "object" }),
+        }]));
+        let parts = crate::surface::Parts {
+            state: None,
+            skills: Some(skills.clone()),
+            topics: None,
+        };
+        let door = open(&settings, "test", crate::surface::catalogue(parts).unwrap()).unwrap();
         assert!(door.log.unfinished().is_empty());
+        assert!(skills.goals().is_empty(), "the goal was not sent again");
         let filter = Filter {
             correlation_id: Some("c1".into()),
             ..Default::default()

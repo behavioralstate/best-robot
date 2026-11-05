@@ -18,7 +18,25 @@ pub struct Parts {
     pub topics: Option<Arc<dyn Topics>>,
 }
 
-/// The catalogue over `parts`, or why two of them would answer to the same name.
+/// What the door says it is, in its manifest, from the parts it was handed.
+pub fn describe(parts: &Parts) -> String {
+    let mut offers = Vec::new();
+    if parts.state.is_some() {
+        offers.push("its state, read by query");
+    }
+    if parts.skills.as_ref().is_some_and(|s| !s.skills().is_empty()) {
+        offers.push("its skills, sent as commands, their runs told as events");
+    }
+    if parts.topics.as_ref().is_some_and(|t| !t.topics().is_empty()) {
+        offers.push("the latest message on each of its topics, read by query");
+    }
+    match offers.as_slice() {
+        [] => "A robot that offers nothing yet.".into(),
+        _ => format!("A robot: {}.", offers.join("; ")),
+    }
+}
+
+/// The catalogue over `parts`, or why two of them would answer to the same name or type.
 pub fn catalogue(parts: Parts) -> Result<Catalogue, String> {
     let mut names = HashSet::new();
     let mut claim = |name: String, what: &str| {
@@ -35,11 +53,17 @@ pub fn catalogue(parts: Parts) -> Result<Catalogue, String> {
         claim("get-robot-state".into(), "the robot's state")?;
         c = c.query(state::query(robot));
     }
-    if let Some(sk) = parts.skills {
+    if let Some(sk) = parts.skills.filter(|s| !s.skills().is_empty()) {
         for s in sk.skills() {
             claim(s.name.clone(), &format!("skill {}", s.name))?;
+            for ty in skills::types(&s.name) {
+                claim(ty, &format!("skill {}", s.name))?;
+            }
         }
         claim(skills::CANCEL.into(), "cancelling a skill")?;
+        for ty in skills::CANCEL_TYPES {
+            claim(ty.into(), "cancelling a skill")?;
+        }
         c = skills::add(c, sk);
     }
     if let Some(t) = parts.topics {
@@ -105,5 +129,43 @@ mod tests {
             topics: Some(Arc::new(FakeTopics::new(vec![topic]))),
         };
         assert!(catalogue(shadowing_state).err().unwrap().contains("get-robot-state"));
+    }
+
+    #[test]
+    fn two_skills_whose_types_would_be_the_same_stop_the_door() {
+        // x-1 and x1 are both X1; count-progressed's command would be count's feedback event.
+        for pair in [["x-1", "x1"], ["count", "count-progressed"]] {
+            let parts = Parts {
+                state: None,
+                skills: Some(Arc::new(FakeSkills::new(pair.map(skill).to_vec()))),
+                topics: None,
+            };
+            assert!(catalogue(parts).is_err(), "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn the_description_and_cancel_skill_follow_what_the_parts_offer() {
+        let none = Parts {
+            state: Some(Arc::new(robot::Fake::default())),
+            skills: Some(Arc::new(FakeSkills::new(vec![]))),
+            topics: None,
+        };
+        assert_eq!(describe(&none), "A robot: its state, read by query.");
+        let c = catalogue(none).unwrap();
+        assert!(
+            c.command_by_schema(skills::CANCEL, "1.0").is_none(),
+            "no skill, nothing to cancel"
+        );
+        let some = Parts {
+            state: None,
+            skills: Some(Arc::new(FakeSkills::new(vec![skill("count")]))),
+            topics: None,
+        };
+        assert!(describe(&some).contains("skills"));
+        assert!(catalogue(some)
+            .unwrap()
+            .command_by_schema(skills::CANCEL, "1.0")
+            .is_some());
     }
 }

@@ -11,7 +11,19 @@ use serde_json::{json, Value};
 use super::pascal;
 
 pub const CANCEL: &str = "cancel-skill";
+/// The types `cancel-skill` and its events answer to.
+pub const CANCEL_TYPES: [&str; 3] = ["CancelSkill", "SkillCancelRequested", "SkillCancelRefused"];
 const VERSION: &str = "1.0";
+/// The suffixes of a skill's events, in the order a run can produce them.
+const SUFFIXES: [&str; 5] = ["Progressed", "Succeeded", "Aborted", "Canceled", "Refused"];
+
+/// The types the skill `name` answers to: its command's, then its events'.
+pub fn types(name: &str) -> Vec<String> {
+    let ty = pascal(name);
+    std::iter::once(ty.clone())
+        .chain(SUFFIXES.iter().map(|s| format!("{ty}{s}")))
+        .collect()
+}
 
 pub fn add(mut c: Catalogue, skills: Arc<dyn Skills>) -> Catalogue {
     for spec in skills.skills() {
@@ -102,10 +114,7 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
         ),
         data_schema: spec.goal.clone(),
         produces: outcomes(spec).iter().map(|(suffix, ..)| named(suffix)).collect(),
-        completes: ["Succeeded", "Aborted", "Canceled", "Refused"]
-            .iter()
-            .map(|s| named(s))
-            .collect(),
+        completes: SUFFIXES[1..].iter().map(|s| named(s)).collect(),
         impact: None,
         admit: None,
         handler: Arc::new(move |envelope: Envelope, emitter: Emitter| {
@@ -125,7 +134,7 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
                     Ok(Outcome::Refused(why)) => emitter.emit(&format!("{ty}Refused"), json!({ "reason": why })),
                     Err(e) => emitter.emit(
                         "CommandFailed",
-                        json!({ "type": ty, "reason": format!("{e}: read the robot's state before sending it again") }),
+                        json!({ "type": ty, "reason": format!("{e}. It may have started the goal before that and still be running it: read what the robot reports before sending the goal again, under a new command id") }),
                     ),
                 };
             })
@@ -157,7 +166,10 @@ fn cancel(skills: Arc<dyn Skills>) -> CommandDef {
                         "SkillCancelRefused",
                         json!({ "command": command, "reason": "no run of yours started by that command is in flight: it ended already, or never started; read the events of that command" }),
                     ),
-                    Err(e) => emitter.emit("CommandFailed", json!({ "type": "CancelSkill", "reason": e.to_string() })),
+                    Err(e) => emitter.emit(
+                        "CommandFailed",
+                        json!({ "type": "CancelSkill", "reason": format!("{e}. The run was not cancelled: send cancel-skill again in a moment, under a new command id") }),
+                    ),
                 };
             })
         }),
@@ -256,6 +268,47 @@ mod tests {
             types(&door.events_until("run-1", &["CountCanceled"]).await),
             ["CountCanceled"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_run_the_robot_stopped_answering_during_fails_saying_it_may_still_run() {
+        let (door, _) = door(FakeSkills::new(vec![spec("count")]).lost("count", vec![json!({ "at": 1 })])).await;
+        door.send("count", "Count", "c1", json!({})).await;
+        let events = door.events_until("c1", &["CommandFailed"]).await;
+        assert_eq!(types(&events), ["CountProgressed", "CommandFailed"]);
+        let reason = events[1]["data"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("still be running") && reason.contains("new command id"),
+            "{reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_agent_cannot_cancel_a_run_it_did_not_start() {
+        let (door, _) = door(FakeSkills::new(vec![spec("count")]).held("count")).await;
+        door.send("count", "Count", "run-1", json!({})).await;
+        let other = door.other();
+        for i in 0..20 {
+            other
+                .send(CANCEL, "CancelSkill", &format!("x{i}"), json!({ "command": "run-1" }))
+                .await;
+            let events = other
+                .events_until(&format!("x{i}"), &["SkillCancelRequested", "SkillCancelRefused"])
+                .await;
+            assert_eq!(types(&events), ["SkillCancelRefused"]);
+        }
+        // The run is still the first agent's to cancel.
+        for i in 0..100 {
+            door.send(CANCEL, "CancelSkill", &format!("y{i}"), json!({ "command": "run-1" }))
+                .await;
+            let events = door
+                .events_until(&format!("y{i}"), &["SkillCancelRequested", "SkillCancelRefused"])
+                .await;
+            if types(&events) == ["SkillCancelRequested"] {
+                return;
+            }
+        }
+        panic!("the run's own sender could not cancel it");
     }
 
     #[tokio::test]

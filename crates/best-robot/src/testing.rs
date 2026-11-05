@@ -19,28 +19,15 @@ const ENDPOINT: &str = "http://door.test";
 pub struct Signed {
     pub router: axum::Router,
     key: String,
+    /// Another agent's key on the same door.
+    other: String,
 }
 
 impl Signed {
     pub async fn over(parts: Parts) -> Self {
         let auth = Auth::ephemeral(ENDPOINT, Box::new(FakeApprover { proof: "p".into() }));
-        let device = auth
-            .start_device(DeviceRequest {
-                client_id: Some("test".into()),
-                connection: Some("test-robot".into()),
-                ..Default::default()
-            })
-            .unwrap();
-        auth.approve(&device.user_code, "p", Grant::default(), None)
-            .await
-            .unwrap();
-        let token = auth
-            .token(TokenRequest {
-                grant_type: Some("urn:ietf:params:oauth:grant-type:device_code".into()),
-                device_code: Some(device.device_code),
-                client_id: Some("test".into()),
-            })
-            .unwrap();
+        let key = sign_in(&auth, "test").await;
+        let other = sign_in(&auth, "other").await;
         let catalogue = surface::catalogue(parts).unwrap();
         let door = Door::new(
             ENDPOINT,
@@ -52,7 +39,17 @@ impl Signed {
         );
         Self {
             router: best_peer_door::router(Arc::new(door)),
-            key: token["access_token"].as_str().unwrap().into(),
+            key,
+            other,
+        }
+    }
+
+    /// The same door, as the other agent.
+    pub fn other(&self) -> Self {
+        Self {
+            router: self.router.clone(),
+            key: self.other.clone(),
+            other: self.key.clone(),
         }
     }
 
@@ -96,4 +93,26 @@ impl Signed {
         }
         panic!("none of {last:?} under {correlation} within five seconds");
     }
+}
+
+/// An agent `client` signed in through the device flow, its key.
+async fn sign_in(auth: &Auth, client: &str) -> String {
+    let device = auth
+        .start_device(DeviceRequest {
+            client_id: Some(client.into()),
+            connection: Some(format!("{client}-robot")),
+            ..Default::default()
+        })
+        .unwrap();
+    auth.approve(&device.user_code, "p", Grant::default(), None)
+        .await
+        .unwrap();
+    let token = auth
+        .token(TokenRequest {
+            grant_type: Some("urn:ietf:params:oauth:grant-type:device_code".into()),
+            device_code: Some(device.device_code),
+            client_id: Some(client.into()),
+        })
+        .unwrap();
+    token["access_token"].as_str().unwrap().into()
 }
