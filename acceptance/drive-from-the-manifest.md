@@ -29,14 +29,18 @@ This file records the run: how it was set up, what it showed, and the transcript
     - its built-in tools reduced to its own tool search (`--tools ToolSearch`), the one it needs to load an MCP
       server's tools;
     - slash commands and auto memory off;
-    - `--strict-mcp-config`, so the published connector was its one MCP server.
+    - `--strict-mcp-config`, so the published connector was its one MCP server;
+    - `--allowedTools 'mcp__best__*'`, which allows every tool of the connector in advance, so the client asked the
+      person no permission question.
   - The connector was `@behavioralstate/best-mcp` 2.6.3:
     - it had no connection configured;
     - `BEST_MCP_ALLOW_LOCAL=true` was set because the door was on loopback;
     - its credential file was in a scratch folder, deleted afterwards.
   - Every call in the transcript is either a `best-*` tool of the connector or the client's tool search.
-  - Earlier tries ran the client headless (`claude -p`) and were set aside: each turn there starts a new connector,
-    which loses the sign-in that is waiting for the person's approval.
+  - Earlier tries ran the client headless, and none of them reached the robot. Tries that resumed `claude -p` turn
+    by turn started a new connector each turn, which lost the sign-in waiting for the person's approval. The last
+    try, one headless process fed the person's answers, was stopped at the sign-in, and the run was made with the
+    person at their own terminal instead.
 - **Nothing written for the agent**: the person's sentence at the top of the transcript is all it got. It read:
   - the manifest;
   - both catalogues;
@@ -50,7 +54,8 @@ This file records the run: how it was set up, what it showed, and the transcript
     answered the client at 23:33:42.
   - The door issued the key on the agent's next exchange, at 23:33:43.
 - **The validator**: `best-validate` 0.4.3 passed against the door, anonymous, after the run: BEST 0.9.17,
-  conformant, 0 failures. Its one warning is that the manifest has no `ETag` or `Cache-Control` header.
+  conformant, 0 failures. Its one warning is that the manifest has no `ETag` or `Cache-Control` header. The gate's
+  validate step printed the same result on the commit that adds this record, which changes no code.
 
 ## What the run showed
 
@@ -70,8 +75,12 @@ This file records the run: how it was set up, what it showed, and the transcript
     did and how it ended.
 - The agent never asked where the bounds were. The refusal told it, and the manifest's descriptions told it how a
   run ends and how to cancel one.
-- Both navigations that succeeded did so with 0.20 m of the goal left, which Nav2 counts as arrived. The agent
-  reported where the robot stopped, not the goal.
+- Both navigations that succeeded ended with Nav2's feedback reading 0.20 m left. Neither ended on its goal:
+  - the first ended at x -0.75, y -0.57, 0.20 m from its goal;
+  - the second ended at x 2.03, y -0.24, 0.36 m from x 2.3, y 0, a distance this record measures from the reported
+    pose.
+
+  The agent reported where the robot stopped, not the goal.
 - The agent followed the runs in two ways:
   - with `sample_event_stream`, filtered by the command's correlation id;
   - with `get_events` for history.
