@@ -56,26 +56,26 @@ async fn hold(State(o): State<Owner>, Form(f): Form<HoldForm>) -> Response {
     let since = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
-    let held = match o.hold.hold(&reason, &since) {
-        Ok(h) => h,
-        Err(e) => {
-            return failed(&format!(
-                "the hold could not be written down, so it is not in force: {e}"
-            ))
-        }
-    };
+    // In force before anything else, even when it cannot be written down: a hold that fails open would let the robot
+    // run on while its owner believes it stopped.
+    let (held, written) = o.hold.hold(&reason, &since);
     tracing::warn!(reason = %held.reason, now = f.now, "the robot is held by its owner");
+    let warning = written.err().map(|e| {
+        tracing::error!(error = %e, "the hold could not be written down");
+        format!("the hold is in force, but could not be written down, so a restart of the door would lose it: {e}")
+    });
     let mut stopped = vec![];
     if let (true, Some(guard)) = (f.now, &o.guard) {
         let why = format!("a person took this robot over: {}", held.reason);
-        for (run, took) in guard.stop_all(&why).await {
-            stopped.push(match took {
-                Ok(took) => json!({ "run": run, "cancelled": took }),
-                Err(e) => json!({ "run": run, "cancelled": false, "error": e.to_string() }),
-            });
+        for (run, ended) in guard.stop_all(&why).await {
+            stopped.push(json!({ "run": run, "ended": ended }));
         }
     }
-    Json(json!({ "held": { "reason": held.reason, "since": held.since }, "stopped": stopped })).into_response()
+    let mut body = json!({ "held": { "reason": held.reason, "since": held.since }, "stopped": stopped });
+    if let Some(w) = warning {
+        body["warning"] = w.into();
+    }
+    Json(body).into_response()
 }
 
 async fn release(State(o): State<Owner>, Form(f): Form<ReleaseForm>) -> Response {

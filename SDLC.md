@@ -50,7 +50,8 @@
   sent through the door and read back as events; then the nav2 lane: the simulated robot driven through the door to a
   pose and back, out of the map and cancelled on the way, each read back as events, then behind the owner's envelope:
   a goal outside the geofence and one in a forbidden zone refused, a key scoped to one skill refused another, and
-  `best-robot hold --now` stopping a navigation, held across a restart, until `best-robot release`. It ends in `GATE GREEN` or
+  `best-robot hold --now` stopping a navigation, held across a restart, until `best-robot release`, and a navigation
+  stopped above a speed ceiling on the robot's odometry. It ends in `GATE GREEN` or
   `GATE RED`; CI runs the same script.
 
 ## 4. Ship

@@ -62,7 +62,7 @@ impl Rosbridge {
                     ("x", &t.x, "number"),
                     ("y", &t.y, "number"),
                 ] {
-                    if schema::at(&goal, pointer)["type"] != kind {
+                    if !robot::schema::allows(robot::schema::at(&goal, pointer), kind) {
                         return Err(Unreachable(format!(
                             "skill {}: target.{field} {pointer} is not a {kind} field of {}'s goal",
                             s.name, s.action_type

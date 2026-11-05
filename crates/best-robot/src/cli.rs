@@ -44,12 +44,14 @@ pub fn hold(settings: &Settings, now: bool, reason: Option<&str>) -> Result<Stri
         body["held"]["since"].as_str().unwrap_or("now"),
         body["held"]["reason"].as_str().unwrap_or("")
     )];
+    lines.extend(body["warning"].as_str().map(|w| format!("warning: {w}")));
     for s in body["stopped"].as_array().into_iter().flatten() {
         let run = s["run"].as_str().unwrap_or("?");
-        lines.push(match (s["cancelled"].as_bool(), s["error"].as_str()) {
-            (_, Some(why)) => format!("run {run} could not be stopped and may run on: {why}"),
-            (Some(true), _) => format!("stopped run {run}, told to its holder"),
-            _ => format!("run {run} had ended already"),
+        lines.push(match s["ended"].as_bool() {
+            Some(true) => format!("stopped run {run}, told to its holder"),
+            _ => {
+                format!("run {run} has not ended yet: the door keeps cancelling it; stop it at the robot if it runs on")
+            }
         });
     }
     Ok(lines.join("\n"))
@@ -79,7 +81,7 @@ pub fn seconds(text: &str) -> Result<u64, String> {
         _ => 0,
     };
     match number.parse::<u64>() {
-        Ok(n) if n > 0 && scale > 0 => Ok(n * scale),
+        Ok(n) if n > 0 && scale > 0 && n.checked_mul(scale).is_some() => Ok(n * scale),
         _ => Err(format!(
             "--expires {text:?} is not a span: write it as 90s, 30m, 2h or 7d"
         )),
@@ -152,6 +154,7 @@ mod tests {
         assert_eq!(seconds("45"), Ok(45));
         assert!(seconds("2 weeks").is_err());
         assert!(seconds("0m").is_err());
+        assert!(seconds("213503982334602d").is_err(), "a span that overflows is not one");
     }
 
     struct Served {
@@ -340,7 +343,7 @@ mod tests {
     async fn hold_now_stops_the_run_telling_its_holder_and_release_takes_commands_again() {
         let envelope = Envelope::parse("frame = \"map\"\ngeofence = [[-2, -2], [2, -2], [2, 2], [-2, 2]]\n").unwrap();
         served(
-            skills(FakeSkills::new(vec![skill("go")]).held("go", vec![])),
+            skills(FakeSkills::new(vec![skill("go")]).held("go", vec![json!({ "left": 1 })])),
             Some(envelope),
             |s| {
                 let key = s.sign_in("test", Grant::default());
@@ -352,7 +355,7 @@ mod tests {
                     "{body}"
                 );
                 assert_eq!(s.send(&key, "go", "Go", "run-1", place.clone()).0, 201);
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                s.events_until(&key, "run-1", &["GoProgressed"]);
                 let said = hold(&s.settings, true, Some("servicing the arm")).unwrap();
                 assert!(said.contains("stopped run"), "{said}");
                 let events = s.events_until(&key, "run-1", &["GoStopped"]);

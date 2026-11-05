@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 
 mod fake;
+pub mod schema;
 mod skills;
 mod topics;
 pub use fake::{Fake, FakeSkills, FakeTopics};

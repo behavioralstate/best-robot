@@ -90,10 +90,17 @@ impl Envelope {
         Ok(e)
     }
 
-    /// The topics the envelope reads, for the door to check it has them.
-    pub fn topics(&self) -> Vec<&str> {
-        let position = self.position.as_ref().map(|p| p.topic.as_str());
-        let speed = self.speed.as_ref().map(|s| s.topic.as_str());
+    /// What the envelope reads while a skill runs: by bound, the topic and the pointers to its numbers, for the
+    /// door to check the robot offers them.
+    pub fn readings(&self) -> Vec<(&'static str, &str, [&str; 2])> {
+        let position = self
+            .position
+            .as_ref()
+            .map(|p| ("position", p.topic.as_str(), [p.x.as_str(), p.y.as_str()]));
+        let speed = self
+            .speed
+            .as_ref()
+            .map(|s| ("speed", s.topic.as_str(), [s.x.as_str(), s.y.as_str()]));
         position.into_iter().chain(speed).collect()
     }
 
@@ -113,33 +120,72 @@ impl Envelope {
         self.within(x, y)
     }
 
-    /// Whether the point is inside the fence and in no zone.
+    /// Whether the point is inside the fence and in no zone. Both are closed: a point on the fence is inside it, and
+    /// one on a zone's edge is in the zone.
     pub fn within(&self, x: f64, y: f64) -> Result<(), Refusal> {
         if let Some(fence) = &self.geofence {
-            if !inside(fence, x, y) {
-                let (nx, ny) = beyond(fence, x, y);
+            if !(inside(fence, x, y) || on_edge(fence, x, y)) {
+                let nearest = self.nearest(x, y);
                 return Err(refusal(
                     "OUTSIDE_GEOFENCE",
                     format!(
-                        "x {x}, y {y} is outside the geofence this robot's owner set: send a place inside it; the nearest is about x {nx:.2}, y {ny:.2}"
+                        "x {x}, y {y} is outside the geofence this robot's owner set: send a place inside it{}",
+                        said(nearest)
                     ),
-                    json!({ "x": x, "y": y, "geofence": fence, "nearest": { "x": nx, "y": ny } }),
+                    json!({ "x": x, "y": y, "geofence": fence, "nearest": point(nearest) }),
                 ));
             }
         }
-        if let Some(z) = self.zones.iter().find(|z| inside(&z.polygon, x, y)) {
-            let (nx, ny) = beyond(&z.polygon, x, y);
+        if let Some(z) = self.zones.iter().find(|z| in_zone(z, x, y)) {
+            let nearest = self.nearest(x, y);
             return Err(refusal(
                 "IN_FORBIDDEN_ZONE",
                 format!(
-                    "x {x}, y {y} is in {:?}, a zone this robot's owner forbade: send a place outside it; the nearest is about x {nx:.2}, y {ny:.2}",
-                    z.name
+                    "x {x}, y {y} is in {:?}, a zone this robot's owner forbade: send a place outside it{}",
+                    z.name,
+                    said(nearest)
                 ),
-                json!({ "x": x, "y": y, "zone": z.name, "polygon": z.polygon, "nearest": { "x": nx, "y": ny } }),
+                json!({ "x": x, "y": y, "zone": z.name, "polygon": z.polygon, "nearest": point(nearest) }),
             ));
         }
         Ok(())
     }
+
+    /// The admitted place nearest (x, y) among those [`MARGIN`] off an edge of the fence or a zone, if there is one.
+    fn nearest(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let polygons = self
+            .geofence
+            .iter()
+            .map(Vec::as_slice)
+            .chain(self.zones.iter().map(|z| z.polygon.as_slice()));
+        polygons
+            .flat_map(|poly| off_edges(poly, x, y))
+            .filter(|&(cx, cy)| self.admitted(cx, cy))
+            .min_by(|a, b| (a.0 - x).hypot(a.1 - y).total_cmp(&(b.0 - x).hypot(b.1 - y)))
+    }
+
+    fn admitted(&self, x: f64, y: f64) -> bool {
+        let fenced = self
+            .geofence
+            .as_ref()
+            .is_none_or(|f| inside(f, x, y) || on_edge(f, x, y));
+        fenced && !self.zones.iter().any(|z| in_zone(z, x, y))
+    }
+}
+
+fn in_zone(z: &Zone, x: f64, y: f64) -> bool {
+    inside(&z.polygon, x, y) || on_edge(&z.polygon, x, y)
+}
+
+/// ", the nearest is about ..." when there is a nearest place, else nothing.
+fn said(nearest: Option<(f64, f64)>) -> String {
+    nearest
+        .map(|(x, y)| format!("; the nearest is about x {x:.2}, y {y:.2}"))
+        .unwrap_or_default()
+}
+
+fn point(p: Option<(f64, f64)>) -> Value {
+    p.map(|(x, y)| json!({ "x": x, "y": y })).unwrap_or(Value::Null)
 }
 
 fn refusal(code: &'static str, message: String, details: Value) -> Refusal {
@@ -172,31 +218,42 @@ fn inside(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
     inside
 }
 
-/// The point nearest (x, y) on the polygon's edge, moved [`MARGIN`] past it, along the way from (x, y) to it: inwards
-/// from a point outside, outwards from one inside.
-fn beyond(poly: &[[f64; 2]], x: f64, y: f64) -> (f64, f64) {
-    let (mut best, mut at) = (f64::INFINITY, (x, y));
-    for (i, a) in poly.iter().enumerate() {
-        let b = poly[(i + 1) % poly.len()];
-        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        let len2 = dx * dx + dy * dy;
-        let t = if len2 == 0.0 {
-            0.0
-        } else {
-            (((x - a[0]) * dx + (y - a[1]) * dy) / len2).clamp(0.0, 1.0)
-        };
-        let p = (a[0] + t * dx, a[1] + t * dy);
-        let d = (p.0 - x).hypot(p.1 - y);
-        if d < best {
-            (best, at) = (d, p);
-        }
-    }
-    let (ux, uy) = if best > 0.0 {
-        ((at.0 - x) / best, (at.1 - y) / best)
+/// Whether (x, y) lies on an edge of the polygon.
+fn on_edge(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
+    edges(poly).any(|(a, b)| {
+        let p = project(a, b, x, y);
+        (p.0 - x).hypot(p.1 - y) < 1e-9
+    })
+}
+
+fn edges(poly: &[[f64; 2]]) -> impl Iterator<Item = ([f64; 2], [f64; 2])> + '_ {
+    poly.iter().enumerate().map(|(i, a)| (*a, poly[(i + 1) % poly.len()]))
+}
+
+/// The point of the segment a-b nearest (x, y).
+fn project(a: [f64; 2], b: [f64; 2], x: f64, y: f64) -> (f64, f64) {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 {
+        0.0
     } else {
-        (0.0, 0.0)
+        (((x - a[0]) * dx + (y - a[1]) * dy) / len2).clamp(0.0, 1.0)
     };
-    (at.0 + ux * MARGIN, at.1 + uy * MARGIN)
+    (a[0] + t * dx, a[1] + t * dy)
+}
+
+/// For each edge of the polygon, the points [`MARGIN`] to either side of the edge's point nearest (x, y).
+fn off_edges(poly: &[[f64; 2]], x: f64, y: f64) -> impl Iterator<Item = (f64, f64)> + '_ {
+    edges(poly).flat_map(move |(a, b)| {
+        let p = project(a, b, x, y);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = dx.hypot(dy);
+        let (nx, ny) = if len > 0.0 { (-dy / len, dx / len) } else { (0.0, 0.0) };
+        [
+            (p.0 + nx * MARGIN, p.1 + ny * MARGIN),
+            (p.0 - nx * MARGIN, p.1 - ny * MARGIN),
+        ]
+    })
 }
 
 #[cfg(test)]
@@ -210,6 +267,35 @@ geofence = [[-2, -2], [2, -2], [2, 2], [-2, 2]]
 name = "centre"
 polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
 "#;
+
+    #[test]
+    fn the_nearest_place_offered_is_one_that_is_admitted() {
+        // A zone against the wall: the nearest edge of the zone is the wall, so the offer is the zone's inner side.
+        let e = Envelope::parse(
+            "frame = \"map\"\ngeofence = [[-2, -2], [2, -2], [2, 2], [-2, 2]]\n[[zones]]\nname = \"dock\"\npolygon = [[1.5, -0.5], [2, -0.5], [2, 0.5], [1.5, 0.5]]\n",
+        )
+        .unwrap();
+        for (x, y) in [(1.8, 0.0), (5.0, 0.0), (1.5, 0.0), (2.0, 0.0)] {
+            let r = e.place("map", x, y).unwrap_err();
+            let n = &r.details["nearest"];
+            let (nx, ny) = (n["x"].as_f64().unwrap(), n["y"].as_f64().unwrap());
+            assert!(
+                e.place("map", nx, ny).is_ok(),
+                "{x} {y} offered {nx} {ny}: {}",
+                r.message
+            );
+        }
+    }
+
+    #[test]
+    fn the_fence_and_the_zones_are_closed() {
+        let e = Envelope::parse(ENVELOPE).unwrap();
+        assert!(e.place("map", 2.0, 0.0).is_ok(), "on the fence is inside it");
+        assert!(e.place("map", -2.0, 1.0).is_ok());
+        for (x, y) in [(0.5, 0.0), (-0.5, 0.0), (0.0, 0.5), (0.0, -0.5)] {
+            assert_eq!(e.place("map", x, y).unwrap_err().code, "IN_FORBIDDEN_ZONE", "{x} {y}");
+        }
+    }
 
     #[test]
     fn a_place_inside_the_fence_and_in_no_zone_may_be_sent() {

@@ -18,4 +18,5 @@ echo "starting the simulated robot (Gazebo, TurtleBot3, Nav2)..."
 testbed_up nav2 "$container" 9092 'lifecycle_manager_navigation\]: .{0,20}Managed nodes are active' 300
 echo "the simulated robot is up; starting its door"
 cargo build --release -q -p best-robot
-BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG=testbed/nav2/best-robot.toml \n  BEST_ROBOT_ENVELOPE="${BEST_ROBOT_ENVELOPE-testbed/nav2/envelope.toml}" target/release/best-robot
+BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG=testbed/nav2/best-robot.toml \
+  BEST_ROBOT_ENVELOPE="${BEST_ROBOT_ENVELOPE-testbed/nav2/envelope.toml}" target/release/best-robot

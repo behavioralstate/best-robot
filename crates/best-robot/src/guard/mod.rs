@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use robot::{place, Outcome, Progress, Refusal, SkillSpec, Skills, Topics, Unreachable};
+use robot::{place, schema, Outcome, Progress, Refusal, SkillSpec, Skills, Topics, Unreachable};
 use serde_json::{json, Value};
+use tokio::sync::{watch, Notify};
 
 use envelope::Envelope;
 use hold::Hold;
@@ -22,18 +23,49 @@ use hold::Hold;
 const WATCH_EVERY: Duration = Duration::from_millis(200);
 /// How old the robot's last word on its speed may be while a skill runs, before the ceiling counts as not held.
 const SPEED_WITHIN: Duration = Duration::from_secs(2);
+/// How long a stopped run's cancel is given before it is sent again: the robot may not have taken the goal yet, or
+/// the cancel may have been lost.
+const CANCEL_AGAIN: Duration = Duration::from_millis(500);
+/// How long `stop_all` waits for the runs it stopped to end, before it says which still run.
+const STOP_WITHIN: Duration = Duration::from_secs(5);
 
 pub struct Guard {
     inner: Arc<dyn Skills>,
     envelope: Option<Envelope>,
     topics: Option<Arc<dyn Topics>>,
     hold: Arc<Hold>,
-    /// The runs in flight, each with why the guard stopped it, once it did.
-    runs: Mutex<HashMap<String, Option<String>>>,
+    /// The runs in flight, listed before they are admitted, so a hold finds every run it does not refuse.
+    runs: Mutex<HashMap<String, Arc<Run>>>,
+}
+
+/// A run in flight, as the guard sees it.
+struct Run {
+    /// Why the guard stopped it, once it did; the first reason stands.
+    why: Mutex<Option<String>>,
+    stop: Notify,
+    ended: watch::Sender<bool>,
+}
+
+impl Run {
+    fn new() -> Self {
+        Self {
+            why: Mutex::new(None),
+            stop: Notify::new(),
+            ended: watch::channel(false).0,
+        }
+    }
+
+    /// Stops the run for `reason`, or for the reason it was stopped for already, and says which.
+    fn stop_for(&self, reason: &str) -> String {
+        let why = self.why.lock().unwrap().get_or_insert_with(|| reason.into()).clone();
+        self.stop.notify_one();
+        why
+    }
 }
 
 impl Guard {
-    /// The guard over `inner`, or why the envelope cannot be held: it reads a topic the robot does not offer.
+    /// The guard over `inner`, or why the envelope cannot be held: it reads a topic the robot does not offer, or a
+    /// field that topic's message has no number at.
     pub fn new(
         inner: Arc<dyn Skills>,
         envelope: Option<Envelope>,
@@ -41,14 +73,21 @@ impl Guard {
         hold: Arc<Hold>,
     ) -> Result<Self, String> {
         if let Some(e) = &envelope {
-            for wanted in e.topics() {
+            for (what, topic, pointers) in e.readings() {
                 let offered = topics
                     .as_ref()
-                    .is_some_and(|t| t.topics().iter().any(|spec| spec.name == wanted));
-                if !offered {
+                    .and_then(|t| t.topics().iter().find(|spec| spec.name == topic).cloned());
+                let Some(spec) = offered else {
                     return Err(format!(
-                        "the envelope reads topic {wanted:?}, which the robot does not offer: list it among its topics"
+                        "the envelope's {what} reads topic {topic:?}, which the robot does not offer: list it among its topics"
                     ));
+                };
+                for p in pointers {
+                    if !schema::allows(schema::at(&spec.message, p), "number") {
+                        return Err(format!(
+                            "the envelope's {what} reads {p} on topic {topic:?}, and its message has no number there: point at the field that carries it"
+                        ));
+                    }
                 }
             }
         }
@@ -61,19 +100,21 @@ impl Guard {
         })
     }
 
-    /// Stops every run in flight for `reason`, and says, by run, whether the robot took the cancel.
-    pub async fn stop_all(&self, reason: &str) -> Vec<(String, Result<bool, Unreachable>)> {
-        let runs: Vec<String> = {
-            let mut runs = self.runs.lock().unwrap();
-            for why in runs.values_mut() {
-                why.get_or_insert_with(|| reason.to_string());
-            }
-            runs.keys().cloned().collect()
+    /// Stops every run in flight for `reason`, and says, by run, whether it ended within [`STOP_WITHIN`]. One that has
+    /// not is still being cancelled.
+    pub async fn stop_all(&self, reason: &str) -> Vec<(String, bool)> {
+        let runs: Vec<(String, Arc<Run>)> = {
+            let runs = self.runs.lock().unwrap();
+            runs.iter().map(|(id, r)| (id.clone(), r.clone())).collect()
         };
+        for (_, r) in &runs {
+            r.stop_for(reason);
+        }
         let mut stopped = Vec::new();
-        for run in runs {
-            let took = self.inner.cancel(&run).await;
-            stopped.push((run, took));
+        for (id, r) in runs {
+            let mut ended = r.ended.subscribe();
+            let done = tokio::time::timeout(STOP_WITHIN, ended.wait_for(|e| *e)).await.is_ok();
+            stopped.push((id, done));
         }
         stopped
     }
@@ -107,19 +148,27 @@ impl Guard {
         self.inner.check(skill, goal)
     }
 
-    /// Why what the robot reports breaks the envelope, if it does.
+    /// Why what the robot reports breaks the envelope, if it does. A reading without its number (NaN, or a message
+    /// without the field) breaks it too: the bound cannot be held on it.
     fn breach(&self) -> Option<String> {
         let (e, topics) = (self.envelope.as_ref()?, self.topics.as_ref()?);
-        let number = |m: &Value, at: &str| m.pointer(at).and_then(Value::as_f64);
+        let number = |m: &Value, at: &str, topic: &str| {
+            m.pointer(at).and_then(Value::as_f64).ok_or_else(|| {
+                format!("the robot reported no number at {at} on {topic}, so the bounds its owner set cannot be held")
+            })
+        };
         if let Some(p) = &e.position {
             if let Some(s) = topics.latest(&p.topic) {
-                if let (Some(x), Some(y)) = (number(&s.message, &p.x), number(&s.message, &p.y)) {
-                    if let Err(r) = e.within(x, y) {
-                        return Some(format!(
-                            "the robot reported it is at x {x:.2}, y {y:.2}, which leaves the bounds its owner set ({})",
-                            r.code
-                        ));
-                    }
+                let at = number(&s.message, &p.x, &p.topic).and_then(|x| Ok((x, number(&s.message, &p.y, &p.topic)?)));
+                let (x, y) = match at {
+                    Ok(at) => at,
+                    Err(why) => return Some(why),
+                };
+                if let Err(r) = e.within(x, y) {
+                    return Some(format!(
+                        "the robot reported it is at x {x:.2}, y {y:.2}, which leaves the bounds its owner set ({})",
+                        r.code
+                    ));
                 }
             }
         }
@@ -134,9 +183,13 @@ impl Guard {
                     sp.max
                 ));
             };
-            let v = number(&s.message, &sp.x)
-                .unwrap_or(0.0)
-                .hypot(number(&s.message, &sp.y).unwrap_or(0.0));
+            let v = match (
+                number(&s.message, &sp.x, &sp.topic),
+                number(&s.message, &sp.y, &sp.topic),
+            ) {
+                (Ok(x), Ok(y)) => x.hypot(y),
+                (Err(why), _) | (_, Err(why)) => return Some(why),
+            };
             if v > sp.max {
                 return Some(format!(
                     "the robot reported moving at {v:.2} m/s, above the {} m/s its owner allows",
@@ -149,7 +202,7 @@ impl Guard {
 
     /// Resolves with the first breach, read every [`WATCH_EVERY`]; never, when the envelope reads nothing.
     async fn watch(&self) -> String {
-        let reads = self.envelope.as_ref().is_some_and(|e| !e.topics().is_empty());
+        let reads = self.envelope.as_ref().is_some_and(|e| !e.readings().is_empty());
         if !reads {
             return std::future::pending().await;
         }
@@ -158,6 +211,43 @@ impl Guard {
             if let Some(why) = self.breach() {
                 return why;
             }
+        }
+    }
+
+    async fn guarded(
+        &self,
+        run: &str,
+        skill: &str,
+        goal: Value,
+        progress: Progress,
+        me: &Run,
+    ) -> Result<Outcome, Unreachable> {
+        // Admitted again here, before the goal is sent and after the run is listed: a hold taken before this refuses
+        // the run, and one taken after it finds the run to stop.
+        if let Err(r) = self.admits(skill, &goal) {
+            return Ok(Outcome::Refused(r.message));
+        }
+        let mut running = std::pin::pin!(self.inner.run(run, skill, goal, progress));
+        let breach = tokio::select! {
+            end = &mut running => return end,
+            why = self.watch() => Some(why),
+            () = me.stop.notified() => None,
+        };
+        let reason = me.stop_for(&breach.unwrap_or_default());
+        tracing::warn!(run, reason = %reason, "stopping a run");
+        // Cancelled until the robot ends it: a cancel sent before the robot took the goal, or one lost, is sent again.
+        let end = loop {
+            if let Err(e) = self.inner.cancel(run).await {
+                tracing::warn!(run, error = %e, "the robot did not take the cancel of a stopped run; sending it again");
+            }
+            tokio::select! {
+                end = &mut running => break end,
+                () = tokio::time::sleep(CANCEL_AGAIN) => {}
+            }
+        };
+        match end {
+            Ok(Outcome::Canceled(result)) => Ok(Outcome::Stopped { reason, result }),
+            end => end,
         }
     }
 }
@@ -173,27 +263,12 @@ impl Skills for Guard {
     }
 
     async fn run(&self, run: &str, skill: &str, goal: Value, progress: Progress) -> Result<Outcome, Unreachable> {
-        // Again here, before the goal is sent: the hold or the envelope may have changed since it was accepted.
-        if let Err(r) = self.admits(skill, &goal) {
-            return Ok(Outcome::Refused(r.message));
-        }
-        self.runs.lock().unwrap().insert(run.into(), None);
-        let mut running = std::pin::pin!(self.inner.run(run, skill, goal, progress));
-        let end = tokio::select! {
-            end = &mut running => end,
-            why = self.watch() => {
-                self.runs.lock().unwrap().get_mut(run).map(|w| w.get_or_insert(why));
-                if let Err(e) = self.inner.cancel(run).await {
-                    tracing::warn!(run, error = %e, "the robot did not take the cancel of a run that left its envelope");
-                }
-                running.await
-            }
-        };
-        let stopped = self.runs.lock().unwrap().remove(run).flatten();
-        match (end, stopped) {
-            (Ok(Outcome::Canceled(result)), Some(reason)) => Ok(Outcome::Stopped { reason, result }),
-            (end, _) => end,
-        }
+        let me = Arc::new(Run::new());
+        self.runs.lock().unwrap().insert(run.into(), me.clone());
+        let end = self.guarded(run, skill, goal, progress, &me).await;
+        self.runs.lock().unwrap().remove(run);
+        me.ended.send_replace(true);
+        end
     }
 
     async fn cancel(&self, run: &str) -> Result<bool, Unreachable> {
@@ -281,14 +356,12 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
         while skills.goals().is_empty() {
             tokio::task::yield_now().await;
         }
-        hold.hold("the owner is servicing it", "2026-11-05T00:00:00Z").unwrap();
+        hold.hold("the owner is servicing it", "2026-11-05T00:00:00Z")
+            .1
+            .unwrap();
         let refused = g.check("go", &goal(1.0, 1.0)).unwrap_err();
         assert!(refused.now && refused.code == "HELD", "{refused:?}");
-        let mut stopped = vec![];
-        while stopped.is_empty() || !matches!(stopped[0], (_, Ok(true))) {
-            stopped = g.stop_all("the owner took over").await;
-            tokio::task::yield_now().await;
-        }
+        assert_eq!(g.stop_all("the owner took over").await, vec![("r1".to_string(), true)]);
         let end = running.await.unwrap().unwrap();
         assert_eq!(
             end,
@@ -299,14 +372,47 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_taken_while_a_run_starts_refuses_it_or_stops_it_never_neither() {
+        for _ in 0..20 {
+            let fake = FakeSkills::new(vec![go()]).held("go", vec![]);
+            let (g, skills, hold, _dir) = guard(fake, ENVELOPE, None);
+            let g = Arc::new(g);
+            let running = {
+                let g = g.clone();
+                tokio::spawn(async move { g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await })
+            };
+            hold.hold("taken over", "2026-11-05T00:00:00Z").1.unwrap();
+            g.stop_all("taken over").await;
+            let end = tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            match end {
+                Outcome::Refused(why) => assert!(why.contains("taken over") && skills.goals().is_empty()),
+                Outcome::Stopped { reason, .. } => assert_eq!(reason, "taken over"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    fn numbers(name: &str, fields: &[&str]) -> TopicSpec {
+        let properties: serde_json::Map<String, Value> = fields
+            .iter()
+            .map(|f| (f.to_string(), json!({ "type": ["number", "null"] })))
+            .collect();
+        TopicSpec {
+            name: name.into(),
+            description: "Numbers.".into(),
+            message: json!({ "type": "object", "properties": properties }),
+        }
+    }
+
     #[tokio::test]
     async fn a_run_whose_robot_reports_it_too_fast_or_not_at_all_is_stopped_saying_so() {
         let envelope = format!("{ENVELOPE}[speed]\nmax = 0.3\ntopic = \"odom\"\nx = \"/vx\"\ny = \"/vy\"\n");
-        let odom = TopicSpec {
-            name: "odom".into(),
-            description: "Odometry.".into(),
-            message: json!({ "type": "object" }),
-        };
+        let odom = numbers("odom", &["vx", "vy"]);
         let too_fast = FakeTopics::new(vec![odom.clone()]).live("odom", json!({ "vx": 0.3, "vy": 0.1 }));
         let (g, _, _, _dir) = guard(
             FakeSkills::new(vec![go()]).held("go", vec![]),
@@ -326,6 +432,14 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
             matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("not reported its speed")),
             "{end:?}"
         );
+        // A speed reported as NaN (null) cannot hold the ceiling either.
+        let nan = FakeTopics::new(vec![numbers("odom", &["vx", "vy"])]).live("odom", json!({ "vx": null, "vy": 0.0 }));
+        let (g, _, _, _dir) = guard(FakeSkills::new(vec![go()]).held("go", vec![]), &envelope, Some(nan));
+        let end = g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await.unwrap();
+        assert!(
+            matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("no number at /vx")),
+            "{end:?}"
+        );
     }
 
     #[tokio::test]
@@ -337,12 +451,7 @@ x = \"/x\"
 y = \"/y\"
 "
         );
-        let pose = TopicSpec {
-            name: "pose".into(),
-            description: "Where it is.".into(),
-            message: json!({ "type": "object" }),
-        };
-        let topics = FakeTopics::new(vec![pose]).with("pose", json!({ "x": 0.1, "y": 0.0 }));
+        let topics = FakeTopics::new(vec![numbers("pose", &["x", "y"])]).with("pose", json!({ "x": 0.1, "y": 0.0 }));
         let (g, _, _, _dir) = guard(FakeSkills::new(vec![go()]).held("go", vec![]), &envelope, Some(topics));
         let end = g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await.unwrap();
         assert!(
@@ -364,5 +473,21 @@ y = \"/y\"
         .err()
         .unwrap();
         assert!(e.contains("pose"), "{e}");
+    }
+
+    #[test]
+    fn an_envelope_reading_a_field_the_topic_lacks_stops_the_door() {
+        let dir = tempfile::tempdir().unwrap();
+        let envelope = format!("{ENVELOPE}[speed]\nmax = 1\ntopic = \"odom\"\nx = \"/twist/x\"\ny = \"/vy\"\n");
+        let topics = Arc::new(FakeTopics::new(vec![numbers("odom", &["vx", "vy"])])) as Arc<dyn Topics>;
+        let e = Guard::new(
+            Arc::new(FakeSkills::new(vec![go()])),
+            Some(Envelope::parse(&envelope).unwrap()),
+            Some(topics),
+            Arc::new(Hold::open(dir.path()).unwrap()),
+        )
+        .err()
+        .unwrap();
+        assert!(e.contains("/twist/x") && e.contains("no number"), "{e}");
     }
 }

@@ -6,7 +6,8 @@
 # the nav2 lane, the door driving a simulated TurtleBot3 under Nav2 (testbed/nav2) to a pose and back, out of the map,
 # and cancelled on the way; then, behind the owner's envelope (testbed/nav2/envelope.toml), goals outside the geofence
 # and in a forbidden zone refused with the fix, a key approved for one skill refused another, and `best-robot hold
-# --now` stopping a navigation, kept across a restart of the door, until `best-robot release`. The last line is GATE
+# --now` stopping a navigation, kept across a restart of the door, until `best-robot release`, and a navigation stopped
+# when the robot's odometry reports it above a speed ceiling. The last line is GATE
 # GREEN or GATE RED, and nothing else is a pass. CI runs this same script.
 #
 #   scripts/gate.sh [fmt|clippy|test|build|validate|rosbridge|nav2|all]      default: all
@@ -153,7 +154,10 @@ lane_rosbridge() (
 lane_nav2() (
   set -euo pipefail
   container=best-robot-gate-nav2
-  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
+  # On a failure, Nav2's own complaints, since the container goes with the lane.
+  data="$(mktemp -d)"; trap 'rc=$?; kill $(jobs -p) 2>/dev/null
+    [ "$rc" -ne 0 ] && docker logs "$container" 2>&1 | grep -iE "error|abort|fail|warn" | tail -40
+    docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
   testbed_up nav2 "$container" 9093 'lifecycle_manager_navigation\]: .{0,20}Managed nodes are active' 300
   sed 's/:9092"/:9093"/' testbed/nav2/best-robot.toml > "$data/nav2.toml"
   base=http://127.0.0.1:7884
@@ -179,24 +183,36 @@ lane_nav2() (
   events_until "$base" "$key" gate-cancel 'SkillCancel(Requested|Refused)' 10 | expect "the cancel" 'last.type==="SkillCancelRequested"'
   events_until "$base" "$key" gate-cancelled "$ended" 60 | expect "cancelled on the way" 'last.type==="NavigateToCanceled"'
 
-  restart() { kill "$door"; wait "$door" 2>/dev/null || true; door_over 7884 "$data/nav2.toml" testbed/nav2/envelope.toml; door=$!; }
+  restart() {  # [envelope]: the door again, behind the testbed's envelope or the one named.
+    kill "$door"; wait "$door" 2>/dev/null || true
+    door_over 7884 "$data/nav2.toml" "${1:-testbed/nav2/envelope.toml}"; door=$!
+  }
   restart
   answer "$base" "$key" navigate-to NavigateTo gate-fenced "$(goal 3.0 0.0)" | refused "outside the geofence" 400 OUTSIDE_GEOFENCE
   answer "$base" "$key" navigate-to NavigateTo gate-zoned "$(goal 0.1 0.1)" | refused "in a forbidden zone" 400 IN_FORBIDDEN_ZONE
   narrow=$(sign_in "$base" --may navigate-to)
-  answer "$base" "$narrow" spin Spin gate-spin '{ "target_yaw": 1.57, "time_allowance": { "sec": 10 } }'     | refused "a key for navigate-to alone, on spin" 403 FORBIDDEN
+  answer "$base" "$narrow" spin Spin gate-spin '{ "target_yaw": 1.57, "time_allowance": { "sec": 10 } }' \
+    | refused "a key for navigate-to alone, on spin" 403 FORBIDDEN
 
   ended='NavigateTo(Succeeded|Aborted|Canceled|Refused|Stopped)|CommandFailed'
   send "$base" "$narrow" navigate-to NavigateTo gate-held "$(goal 1.6 1.6)"
   events_until "$base" "$narrow" gate-held NavigateToProgressed 30 >/dev/null
   "$bin" hold --now --reason "the gate takes it over"
-  events_until "$base" "$narrow" gate-held "$ended" 60 | expect "stopped by the hold"     'last.type==="NavigateToStopped" && last.data.reason.includes("the gate takes it over")'
+  events_until "$base" "$narrow" gate-held "$ended" 60 | expect "stopped by the hold" \
+    'last.type==="NavigateToStopped" && last.data.reason.includes("the gate takes it over")'
   answer "$base" "$key" navigate-to NavigateTo gate-while-held "$(goal -2.0 -0.5)" | refused "while held" 409 HELD
   restart
   answer "$base" "$key" navigate-to NavigateTo gate-held-on "$(goal -2.0 -0.5)" | refused "held across a restart" 409 HELD
   "$bin" release
   send "$base" "$key" navigate-to NavigateTo gate-released "$(goal -2.0 -0.5)"
   events_until "$base" "$key" gate-released "$ended" 120 | expect "released, and back" 'last.type==="NavigateToSucceeded"'
+
+  # A ceiling below the 0.5 m/s Nav2 drives at: the run is stopped on the robot's own odometry.
+  sed 's/^max = .*/max = 0.2/' testbed/nav2/envelope.toml > "$data/slow.toml"
+  restart "$data/slow.toml"
+  send "$base" "$key" navigate-to NavigateTo gate-too-fast "$(goal 1.6 1.6)"
+  events_until "$base" "$key" gate-too-fast "$ended" 60 | expect "stopped above the speed ceiling" \
+    'last.type==="NavigateToStopped" && last.data.reason.includes("above the 0.2 m/s")'
 )
 
 if wants validate; then

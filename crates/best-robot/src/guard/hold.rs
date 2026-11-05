@@ -43,19 +43,23 @@ impl Hold {
         self.held.lock().unwrap().clone()
     }
 
-    /// Holds the robot for `reason`, written down before it is in force here, so a restart keeps it.
-    pub fn hold(&self, reason: &str, since: &str) -> std::io::Result<Held> {
+    /// Holds the robot for `reason`, in force here at once, even when it cannot be written down; the second part says
+    /// whether it was, so a restart keeps it. A hold already in force keeps its `since`, and takes the new reason.
+    pub fn hold(&self, reason: &str, since: &str) -> (Held, std::io::Result<()>) {
+        let mut current = self.held.lock().unwrap();
         let held = Held {
             reason: reason.into(),
-            since: since.into(),
+            since: current.as_ref().map_or_else(|| since.into(), |h| h.since.clone()),
         };
-        let mut current = self.held.lock().unwrap();
-        let text = serde_json::to_string(&held).map_err(std::io::Error::other)?;
-        let tmp = self.file.with_extension("json.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, &self.file)?;
         *current = Some(held.clone());
-        Ok(held)
+        let written = serde_json::to_string(&held)
+            .map_err(std::io::Error::other)
+            .and_then(|text| {
+                let tmp = self.file.with_extension("json.tmp");
+                std::fs::write(&tmp, text)?;
+                std::fs::rename(&tmp, &self.file)
+            });
+        (held, written)
     }
 
     /// Releases the hold; false when there was none.
@@ -79,11 +83,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hold = Hold::open(dir.path()).unwrap();
         assert_eq!(hold.current(), None);
-        hold.hold("servicing the arm", "2026-11-05T00:00:00Z").unwrap();
+        hold.hold("servicing the arm", "2026-11-05T00:00:00Z").1.unwrap();
+        let (held, _) = hold.hold("still servicing it", "2026-11-05T01:00:00Z");
+        assert_eq!(held.since, "2026-11-05T00:00:00Z", "a hold in force keeps its since");
         let again = Hold::open(dir.path()).unwrap();
-        assert_eq!(again.current().unwrap().reason, "servicing the arm");
+        assert_eq!(again.current().unwrap().reason, "still servicing it");
         assert!(again.release().unwrap());
         assert_eq!(Hold::open(dir.path()).unwrap().current(), None);
         assert!(!again.release().unwrap(), "nothing left to release");
+    }
+
+    #[test]
+    fn a_hold_that_cannot_be_written_down_is_in_force_all_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let hold = Hold::open(dir.path()).unwrap();
+        // A folder where the file would go: the write fails, as on a read-only or full disk.
+        std::fs::create_dir(dir.path().join("hold.json.tmp")).unwrap();
+        let (held, written) = hold.hold("servicing the arm", "2026-11-05T00:00:00Z");
+        assert!(written.is_err());
+        assert_eq!(hold.current(), Some(held));
     }
 }

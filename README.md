@@ -152,15 +152,19 @@ type = "nav2_msgs/action/NavigateToPose"
 target = { frame = "/pose/header/frame_id", x = "/pose/pose/position/x", y = "/pose/pose/position/y" }
 ```
 
-The door checks each pointer against the goal's type at start, and the envelope's topics against the config's. Then:
+At start the door checks each target pointer against the goal's type, and each envelope pointer against its topic's
+message: one that names no number stops the door, saying which. Then:
 
 - A goal whose place is outside the geofence is refused with 400 `OUTSIDE_GEOFENCE`, one in a zone with 400
   `IN_FORBIDDEN_ZONE`, one in another frame with 400 `WRONG_FRAME`, and one without a place with 400 `NO_PLACE`,
-  before anything reaches the robot. The message names the fix, and `details.nearest` is a place that would be
-  admitted.
+  before anything reaches the robot. The fence and the zones are closed: a place on the fence is inside, and one on a
+  zone's edge is in the zone. The message names the fix, and `details.nearest`, when there is one, is the nearest place
+  just off an edge that would be admitted.
 - While any skill runs, targeted or not, the door reads the position and speed topics every 200 ms. A position
-  outside the fence or in a zone, a speed above the ceiling, or no speed reported for two seconds cancels the run,
-  which ends in `<Skill>Stopped` with the reason.
+  outside the fence or in a zone, a speed above the ceiling, no speed reported for two seconds, or a reading without
+  its number (NaN) stops the run: the door cancels it, again every half second until the robot ends it, and it ends
+  in `<Skill>Stopped` with the reason. The position is the latest the robot reported, however old: a localiser such
+  as AMCL reports only once the robot has moved, so the speed's two seconds are what catch a robot gone silent.
 
 The owner takes the robot over at the machine the door runs on, with the door's settings:
 
@@ -168,10 +172,13 @@ The owner takes the robot over at the machine the door runs on, with the door's 
 best-robot hold --now --reason "servicing the arm"
 ```
 
-From then on every skill is refused with 409 `HELD`, naming the reason and since when. `--now` also stops the runs in
-flight, each ending in `<Skill>Stopped` with the reason; without it, they run on. The hold is written to
-`BEST_ROBOT_DATA` before it is in force, so a door restarted while held is still held. `best-robot release` gives
-the robot back.
+From then on every skill is refused with 409 `HELD`, naming the reason and since when; a second hold changes the
+reason and keeps the since. `--now` also stops the runs in flight, each ending in `<Skill>Stopped` with the reason,
+and the command says which ended within five seconds and which the door is still cancelling; without it, they run
+on. The hold is in force at once and written to `BEST_ROBOT_DATA`, so a door restarted while held is still held;
+when it cannot be written, it is in force all the same and the command warns that a restart would lose it.
+`best-robot release` gives the robot back. The owner's commands refuse a flag they do not take, rather than run
+without it.
 
 ## Layout
 
@@ -188,4 +195,5 @@ lanes need Docker: the rosbridge lane builds `testbed/rosbridge` (ROS 2 Jazzy, r
 topic) and drives the door over it; the nav2 lane builds `testbed/nav2` (the simulated robot above) and drives it
 through the door to a pose and back, out of the map, and cancelled on the way, then, behind the envelope above, refuses
 a goal outside the fence and one in the zone, refuses `spin` to a key approved `--may navigate-to`, and stops a
-navigation with `hold --now`, still held across a restart of the door, until `release`.
+navigation with `hold --now`, still held across a restart of the door, until `release`, and stops one whose
+odometry reports it above a lowered speed ceiling.

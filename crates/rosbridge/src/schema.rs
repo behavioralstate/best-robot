@@ -59,11 +59,6 @@ pub fn integers(value: Value, schema: &Value) -> Value {
     }
 }
 
-/// The schema of the field a JSON Pointer names in a value `schema` describes, or null when there is none.
-pub fn at<'a>(schema: &'a Value, pointer: &str) -> &'a Value {
-    pointer.split('/').skip(1).fold(schema, |s, key| &s["properties"][key])
-}
-
 fn object(t: &Typedef, all: &[Typedef], way: Way, depth: usize) -> Result<Value, String> {
     if depth > 32 {
         return Err(format!("{} nests deeper than 32 types", t.name));
@@ -204,8 +199,8 @@ mod tests {
             { "type": "pkg/Pose", "fieldnames": ["x"], "fieldtypes": ["float64"], "fieldarraylen": [-1] }
         ]));
         let s = of(&t, Way::In).unwrap();
-        assert_eq!(at(&s, "/pose/x")["type"], "number");
-        assert!(at(&s, "/pose/y").is_null());
+        assert_eq!(robot::schema::at(&s, "/pose/x")["type"], "number");
+        assert!(robot::schema::at(&s, "/pose/y").is_null());
     }
 
     #[test]

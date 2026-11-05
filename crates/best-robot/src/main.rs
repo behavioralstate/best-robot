@@ -42,32 +42,72 @@ fn main() {
                 .get(1)
                 .filter(|c| !c.starts_with("--"))
                 .unwrap_or_else(|| fail(USAGE));
-            let (may, expires) = (flag(&args[2..], "--may"), flag(&args[2..], "--expires"));
-            let expires_in = expires.map(|e| cli::seconds(e).unwrap_or_else(|why| fail(&why)));
-            done(cli::approve(&settings(), code, cli::Grant { may, expires_in }));
+            let o = options(&args[2..], &["--may", "--expires"], &[]);
+            let expires_in = o
+                .value("--expires")
+                .map(|e| cli::seconds(e).unwrap_or_else(|why| fail(&why)));
+            done(cli::approve(
+                &settings(),
+                code,
+                cli::Grant {
+                    may: o.value("--may"),
+                    expires_in,
+                },
+            ));
         }
         Some("hold") => {
-            let now = args[1..].iter().any(|a| a == "--now");
-            done(cli::hold(&settings(), now, flag(&args[1..], "--reason")));
+            let o = options(&args[1..], &["--reason"], &["--now"]);
+            done(cli::hold(&settings(), o.has("--now"), o.value("--reason")));
         }
-        Some("release") => done(cli::release(&settings())),
+        Some("release") => {
+            options(&args[1..], &[], &[]);
+            done(cli::release(&settings()))
+        }
         Some("--version" | "-V") => println!("best-robot {}", env!("CARGO_PKG_VERSION")),
         Some("--help" | "-h" | "help") => println!("{USAGE}"),
         Some(other) => fail(&format!("unknown command {other:?}\n\n{USAGE}")),
     }
 }
 
-/// The value after `name` in `args`, when it is there.
-fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-    let at = args.iter().position(|a| a == name)?;
-    match args.get(at + 1) {
-        Some(v) if !v.starts_with("--") => Some(v),
-        _ => fail(&format!(
-            "{name} needs a value
+/// The flags an owner's command was given, or the end of it, naming what it does not take: a command that weakens
+/// what the owner typed (a key for every skill, a hold that stops nothing) must never run on a mistyped flag.
+fn options<'a>(args: &'a [String], valued: &[&str], bare: &[&str]) -> Options<'a> {
+    parse(args, valued, bare).unwrap_or_else(|why| fail(&format!("{why}\n\n{USAGE}")))
+}
 
-{USAGE}"
-        )),
+#[derive(Debug, Default, PartialEq)]
+struct Options<'a>(Vec<(&'a str, Option<&'a str>)>);
+
+impl<'a> Options<'a> {
+    fn value(&self, name: &str) -> Option<&'a str> {
+        self.0.iter().find(|(n, _)| *n == name).and_then(|(_, v)| *v)
     }
+
+    fn has(&self, name: &str) -> bool {
+        self.0.iter().any(|(n, _)| *n == name)
+    }
+}
+
+fn parse<'a>(args: &'a [String], valued: &[&str], bare: &[&str]) -> Result<Options<'a>, String> {
+    let mut o = Options::default();
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        let a = a.as_str();
+        if o.has(a) {
+            return Err(format!("{a} is given twice"));
+        }
+        if valued.contains(&a) {
+            match rest.next() {
+                Some(v) if !v.starts_with("--") => o.0.push((a, Some(v))),
+                _ => return Err(format!("{a} needs a value")),
+            }
+        } else if bare.contains(&a) {
+            o.0.push((a, None));
+        } else {
+            return Err(format!("{a:?} is not something this command takes"));
+        }
+    }
+    Ok(o)
 }
 
 fn done(said: Result<String, String>) {
@@ -140,4 +180,30 @@ fn serve(settings: Settings) {
 fn fail(why: &str) -> ! {
     eprintln!("best-robot: {why}");
     std::process::exit(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_owners_command_refuses_what_it_does_not_take() {
+        let given = args(&["--may", "go", "--now"]);
+        let o = parse(&given, &["--may"], &["--now"]).unwrap();
+        assert_eq!((o.value("--may"), o.has("--now")), (Some("go"), true));
+        for wrong in [
+            &["--may=go"][..],
+            &["--noww"],
+            &["now"],
+            &["--may"],
+            &["--may", "--now"],
+            &["--now", "--now"],
+        ] {
+            assert!(parse(&args(wrong), &["--may"], &["--now"]).is_err(), "{wrong:?}");
+        }
+    }
 }
