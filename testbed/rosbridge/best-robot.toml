@@ -1,0 +1,14 @@
+# The door's view of the testbed, for the gate's rosbridge lane: the container's rosbridge published on 9091.
+rosbridge = "ws://127.0.0.1:9091"
+
+[[skills]]
+name = "fibonacci"
+action = "/fibonacci"
+type = "example_interfaces/action/Fibonacci"
+description = "Computes the Fibonacci sequence up to the given order, one step a tenth of a second; an order above 40 is rejected, 0 is aborted."
+
+[[topics]]
+name = "battery"
+topic = "/battery_state"
+type = "sensor_msgs/msg/BatteryState"
+description = "The battery's state as the robot publishes it; percentage is 0 to 1."

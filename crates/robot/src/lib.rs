@@ -1,10 +1,16 @@
-//! The robot as the door sees it. The door depends on [`Robot`] and never on what stands behind it: the fake here,
-//! and later an adapter over ROS 2. What the robot is on the wire is the door's matter, not this crate's.
+//! The robot as the door sees it, in three narrow ports an adapter implements as far as it can: [`Robot`] (its state),
+//! [`Skills`] (what it can be asked to do) and [`Topics`] (what it last said). The door depends on these and never on
+//! what stands behind them: the fakes here, or an adapter over ROS 2. Goals, feedback and messages are JSON values, as
+//! a robot's middleware carries them; how the door names and serves them is the door's matter.
 
 use async_trait::async_trait;
 
 mod fake;
-pub use fake::Fake;
+mod skills;
+mod topics;
+pub use fake::{Fake, FakeSkills, FakeTopics};
+pub use skills::{Outcome, Progress, SkillSpec, Skills};
+pub use topics::{Snapshot, TopicSpec, Topics};
 
 /// A robot the door speaks for.
 #[async_trait]

@@ -1,6 +1,14 @@
-use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::SystemTime;
 
-use crate::{Pose, Robot, State, Status, Unreachable};
+use async_trait::async_trait;
+use serde_json::Value;
+use tokio::sync::Notify;
+
+use crate::{
+    Outcome, Pose, Progress, Robot, SkillSpec, Skills, Snapshot, State, Status, TopicSpec, Topics, Unreachable,
+};
 
 /// A robot that answers with the state it was given: idle at the origin of `map`, fully charged, unless told
 /// otherwise.
@@ -37,9 +45,133 @@ impl Robot for Fake {
     }
 }
 
+/// How a fake skill behaves: the feedback it sends, then how it ends. `held` runs wait for a cancel instead, and end
+/// [`Outcome::Canceled`] with a null result.
+#[derive(Clone)]
+pub struct Script {
+    pub feedback: Vec<Value>,
+    pub outcome: Outcome,
+    pub held: bool,
+}
+
+/// Skills that do what their script says, and record each goal they were given.
+pub struct FakeSkills {
+    specs: Vec<SkillSpec>,
+    scripts: HashMap<String, Script>,
+    running: Mutex<HashMap<String, std::sync::Arc<Notify>>>,
+    goals: Mutex<Vec<(String, Value)>>,
+}
+
+impl FakeSkills {
+    pub fn new(specs: Vec<SkillSpec>) -> Self {
+        Self {
+            specs,
+            scripts: HashMap::new(),
+            running: Mutex::new(HashMap::new()),
+            goals: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `skill` sends `feedback`, then ends with `outcome`.
+    pub fn ends(mut self, skill: &str, feedback: Vec<Value>, outcome: Outcome) -> Self {
+        let script = Script {
+            feedback,
+            outcome,
+            held: false,
+        };
+        self.scripts.insert(skill.into(), script);
+        self
+    }
+
+    /// `skill` runs until it is cancelled.
+    pub fn held(mut self, skill: &str) -> Self {
+        let script = Script {
+            feedback: vec![],
+            outcome: Outcome::Canceled(Value::Null),
+            held: true,
+        };
+        self.scripts.insert(skill.into(), script);
+        self
+    }
+
+    /// The goals given so far, by skill, in order.
+    pub fn goals(&self) -> Vec<(String, Value)> {
+        self.goals.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Skills for FakeSkills {
+    fn skills(&self) -> &[SkillSpec] {
+        &self.specs
+    }
+
+    async fn run(&self, run: &str, skill: &str, goal: Value, progress: Progress) -> Result<Outcome, Unreachable> {
+        self.goals.lock().unwrap().push((skill.into(), goal));
+        let Some(script) = self.scripts.get(skill) else {
+            return Ok(Outcome::Refused(format!("no script for {skill}")));
+        };
+        let cancelled = std::sync::Arc::new(Notify::new());
+        self.running.lock().unwrap().insert(run.into(), cancelled.clone());
+        for f in &script.feedback {
+            progress(f.clone());
+        }
+        if script.held {
+            cancelled.notified().await;
+        }
+        self.running.lock().unwrap().remove(run);
+        Ok(script.outcome.clone())
+    }
+
+    async fn cancel(&self, run: &str) -> Result<bool, Unreachable> {
+        match self.running.lock().unwrap().get(run) {
+            Some(n) => {
+                n.notify_one();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+/// Topics whose latest messages are the ones it was given.
+pub struct FakeTopics {
+    specs: Vec<TopicSpec>,
+    latest: HashMap<String, Value>,
+}
+
+impl FakeTopics {
+    pub fn new(specs: Vec<TopicSpec>) -> Self {
+        Self {
+            specs,
+            latest: HashMap::new(),
+        }
+    }
+
+    pub fn with(mut self, topic: &str, message: Value) -> Self {
+        self.latest.insert(topic.into(), message);
+        self
+    }
+}
+
+impl Topics for FakeTopics {
+    fn topics(&self) -> &[TopicSpec] {
+        &self.specs
+    }
+
+    fn latest(&self, topic: &str) -> Option<Snapshot> {
+        self.latest.get(topic).map(|m| Snapshot {
+            message: m.clone(),
+            received_at: SystemTime::UNIX_EPOCH,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn answers_with_the_state_it_was_given() {
@@ -50,5 +182,19 @@ mod tests {
             battery_percent: None,
         };
         assert_eq!(Fake::new(given.clone()).state().await.unwrap(), given);
+    }
+
+    #[tokio::test]
+    async fn a_held_skill_runs_until_cancelled() {
+        let skills = Arc::new(FakeSkills::new(vec![]).held("wait"));
+        let running = {
+            let skills = skills.clone();
+            tokio::spawn(async move { skills.run("r1", "wait", json!({}), Box::new(|_| {})).await })
+        };
+        while !skills.cancel("r1").await.unwrap() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(running.await.unwrap().unwrap(), Outcome::Canceled(Value::Null));
+        assert!(!skills.cancel("r1").await.unwrap(), "the run is over");
     }
 }

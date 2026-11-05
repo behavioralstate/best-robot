@@ -66,7 +66,12 @@ mod tests {
             data: dir.path().to_path_buf(),
             robot: RobotKind::Fake,
         };
-        let opened = door::open(&settings, Arc::new(robot::Fake::default())).unwrap();
+        let parts = crate::surface::Parts {
+            state: Some(Arc::new(robot::Fake::default())),
+            skills: None,
+            topics: None,
+        };
+        let opened = door::open(&settings, crate::surface::catalogue(parts).unwrap()).unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let served = tokio::spawn(door::serve(listener, opened, async {
             stopped.await.ok();

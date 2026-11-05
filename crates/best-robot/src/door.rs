@@ -4,30 +4,45 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use best_peer_door::{Auth, Door, EventLog};
-use robot::Robot;
+use best_peer_door::{Auth, Catalogue, Door, EventLog};
+use serde_json::json;
 
 use crate::approver::OwnerApprover;
 use crate::settings::Settings;
-use crate::surface;
 
 /// The service key in the manifest, and the `source` of every event.
 const SERVICE: &str = "io.best.agents";
 
-const DESCRIPTION: &str = "A robot: what it is doing, where it is and its charge, read by query; its skills become commands as they are exposed.";
+const DESCRIPTION: &str =
+    "A robot: its state and what it last said, read by query; its skills, sent as commands, their runs told as events.";
 
-pub fn open(settings: &Settings, robot: Arc<dyn Robot>) -> std::io::Result<Door> {
+/// The door over `catalogue`, with what a run before a restart left unfinished closed as failed.
+pub fn open(settings: &Settings, catalogue: Catalogue) -> std::io::Result<Door> {
     let approver = OwnerApprover::open(&settings.data)?;
     let auth = Auth::open(&settings.data, &settings.endpoint, Box::new(approver))?;
     let log = EventLog::open(&settings.data)?;
-    Ok(Door::new(
+    let door = Door::new(
         &settings.endpoint,
         SERVICE,
         DESCRIPTION,
-        surface::catalogue(robot),
+        catalogue,
         Arc::new(log),
         Arc::new(auth),
-    ))
+    );
+    settle(&door);
+    Ok(door)
+}
+
+/// Every command accepted before a restart and never finished ends in `CommandFailed`, never sent to the robot
+/// again: a goal sent twice moves a robot twice.
+fn settle(door: &Door) {
+    for owed in door.log.unfinished() {
+        let e = owed.envelope;
+        tracing::warn!(command = %e.r#type, id = %e.id, "closing a command the door stopped during");
+        door.emitter(&e.effective_correlation())
+            .with_key(&format!("{}:{}", owed.sender, e.id))
+            .emit("CommandFailed", json!({ "type": e.r#type, "reason": "the door stopped while this ran, so how it ended is not known and it is not sent again: read the robot's state, then send it again if it is still wanted" }));
+    }
 }
 
 /// Serves the door on `listener` until `stop` resolves.
@@ -40,4 +55,41 @@ pub async fn serve(
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(stop)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::RobotKind;
+    use best_peer_door::log::Filter;
+    use best_peer_door::Envelope;
+
+    #[test]
+    fn a_command_the_door_stopped_during_ends_failed_and_is_not_run_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            listen: "127.0.0.1:7780".parse().unwrap(),
+            endpoint: "http://127.0.0.1:7780".into(),
+            data: dir.path().to_path_buf(),
+            robot: RobotKind::Fake,
+        };
+        {
+            let log = EventLog::open(dir.path()).unwrap();
+            let command: Envelope = serde_json::from_value(json!({ "specversion": "1.0", "id": "c1", "source": "t",
+                "type": "Fibonacci", "datacontenttype": "application/json", "time": "2026-11-05T00:00:00Z",
+                "data": { "order": 4 } }))
+            .unwrap();
+            log.accept_command("sender", "c1", "hash", "c1", &command);
+        }
+        let door = open(&settings, Catalogue::new()).unwrap();
+        assert!(door.log.unfinished().is_empty());
+        let filter = Filter {
+            correlation_id: Some("c1".into()),
+            ..Default::default()
+        };
+        let (events, _) = door.log.list_where(&filter, |_| true);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].r#type, "CommandFailed");
+        assert!(events[0].data["reason"].as_str().unwrap().contains("not sent again"));
+    }
 }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/robot", "crates/best-robot"]
+members = ["crates/robot", "crates/rosbridge", "crates/best-robot"]
 
 [workspace.package]
 version = "0.0.1"
@@ -10,6 +10,7 @@ repository = "https://github.com/behavioralstate/best-robot"
 
 [workspace.dependencies]
 async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }

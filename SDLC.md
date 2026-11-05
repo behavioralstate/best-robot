@@ -24,21 +24,25 @@
   robot's own controllers keep the real-time loops, and the emergency stop is physical, never a command.
 - **The door is best-peer's.** `best-peer-door` is a git dependency pinned to a best-peer release tag. A change the
   door needs is made in best-peer and released there, then the pin moves; it is never copied here.
-- **Depend on abstractions this workspace owns.** The door knows the `Robot` trait (`crates/robot`), never ROS or an
-  adapter; `main.rs` is the one place an adapter is chosen. Tests use the fake; an adapter is thin and proven on the
-  testbed, with the proof on the slice's issue. CI runs on the fake and never needs ROS.
-- **Small and cohesive.** A module owns one thing (the settings, the approver, the surface, the door, the approval
-  command); the wire shape of a fact lives next to its schema. Nothing is added before a slice needs it.
+- **Depend on abstractions this workspace owns.** The door knows the robot's ports (`Robot`, `Skills`, `Topics` in
+  `crates/robot`), never ROS or an adapter; `main.rs` is the one place an adapter is chosen. The door's tests use the
+  fakes. An adapter is thin and proven against the ROS 2 testbed (`testbed/rosbridge`, in the gate's rosbridge lane),
+  and on a real robot by hand, with the proof on the slice's issue. No robot is ever needed by CI.
+- **Never send a goal twice.** A command the door stopped during ends in `CommandFailed` at the next start and is
+  never run again; a run whose rosbridge was lost ends the same way, since the robot may still be running it.
+- **Small and cohesive.** A module owns one thing (the settings, the approver, each part of the surface, the door,
+  the approval command); the wire shape of a fact lives next to its schema. Nothing is added before a slice needs it.
 - Facts are events; an event is versioned, never mutated; a redelivery is idempotent; nothing is clamped silently.
 - The README's "Try it" is the operator's path, kept true by the change that moves it.
 
 ## 3. Build
 
-- Tests first where one applies, against the fake.
-- `scripts/gate.sh all` (in Git Bash on Windows) runs `cargo fmt --check`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo test --workspace`, a release build, then `best-validate` on the served door, anonymous and
-  signed in through the device flow and the real `best-robot approve`. It ends in `GATE GREEN` or `GATE RED`; CI runs
-  the same script.
+- Tests first where one applies, against the fakes.
+- `scripts/gate.sh all` (in Git Bash on Windows, with Docker running) runs `cargo fmt --check`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo test --workspace`, a release build, then `best-validate` on the
+  served door, anonymous and signed in through the device flow and the real `best-robot approve`, then the rosbridge
+  lane: the ROS 2 testbed in a container, the adapter's testbed tests, the door over it validated signed in, and a goal
+  sent through the door and read back as events. It ends in `GATE GREEN` or `GATE RED`; CI runs the same script.
 
 ## 4. Ship
 

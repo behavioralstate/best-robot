@@ -16,10 +16,12 @@ pub struct Settings {
 }
 
 /// The robots this build can stand in front of.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum RobotKind {
     /// Answers with a fixed state and moves nothing.
     Fake,
+    /// A ROS 2 robot through rosbridge, with the skills and topics the config file lists.
+    Rosbridge { config: PathBuf },
 }
 
 impl Settings {
@@ -55,9 +57,14 @@ impl Settings {
         };
         let robot = match var("BEST_ROBOT_ROBOT").as_deref() {
             None | Some("fake") => RobotKind::Fake,
+            Some("rosbridge") => RobotKind::Rosbridge {
+                config: var("BEST_ROBOT_CONFIG").map(PathBuf::from).ok_or(
+                    "BEST_ROBOT_ROBOT=rosbridge needs BEST_ROBOT_CONFIG, the file that names the rosbridge and the skills and topics to expose",
+                )?,
+            },
             Some(other) => {
                 return Err(format!(
-                    "BEST_ROBOT_ROBOT={other} is not a robot this build knows: fake"
+                    "BEST_ROBOT_ROBOT={other} is not a robot this build knows: fake or rosbridge"
                 ))
             }
         };
@@ -93,6 +100,23 @@ mod tests {
     fn an_address_off_loopback_is_refused_with_the_reason() {
         let e = read(&[("BEST_ROBOT_LISTEN", "0.0.0.0:7780")]).unwrap_err();
         assert!(e.contains("off loopback"), "{e}");
+    }
+
+    #[test]
+    fn rosbridge_takes_its_config_file_and_is_refused_without_one() {
+        let s = read(&[
+            ("BEST_ROBOT_ROBOT", "rosbridge"),
+            ("BEST_ROBOT_CONFIG", "/etc/robot.toml"),
+        ])
+        .unwrap();
+        assert_eq!(
+            s.robot,
+            RobotKind::Rosbridge {
+                config: PathBuf::from("/etc/robot.toml")
+            }
+        );
+        let e = read(&[("BEST_ROBOT_ROBOT", "rosbridge")]).unwrap_err();
+        assert!(e.contains("BEST_ROBOT_CONFIG"), "{e}");
     }
 
     #[test]

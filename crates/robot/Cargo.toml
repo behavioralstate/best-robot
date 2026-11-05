@@ -1,6 +1,6 @@
 [package]
 name = "robot"
-description = "The robot as the door sees it: an abstraction this workspace owns, with a fake behind it."
+description = "The robot as the door sees it: its state, its skills and its topics, behind abstractions this workspace owns, with fakes."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
 tokio = { workspace = true }

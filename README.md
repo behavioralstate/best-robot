@@ -1,9 +1,9 @@
 # best-robot
 
 A [Behavioral State Protocol](https://behavioralstate.io) door in front of a robot's existing ROS 2 stack. An agent
-that knows only the door's manifest reads what the robot is doing and, as skills are exposed, asks it to do them: a
-skill is a command, its outcome an event. Nothing below the skill level is on the door. The robot's controllers keep
-the real-time loops, and the emergency stop stays a physical button.
+that knows only the door's manifest reads what the robot is doing and asks it to do what it can: a skill is a
+command, its run a series of events. Nothing below the skill level is on the door. The robot's controllers keep the
+real-time loops, and the emergency stop stays a physical button.
 
 It sits next to [best-peer](https://github.com/behavioralstate/best-peer), which hosts the models a robot reasons
 with, and is built on best-peer's door crate. The plan is the epic
@@ -11,8 +11,9 @@ with, and is built on best-peer's door crate. The plan is the epic
 [Behavioralstate board](https://github.com/orgs/Amarcode-Studios/projects/4). How the work is made and shipped is
 [SDLC.md](SDLC.md).
 
-**Where it stands:** the door serves a fake robot's state. There's no ROS bridge and no commands yet, and it serves
-http on loopback only.
+**Where it stands:** the door serves a fake robot's state, or a ROS 2 robot's actions and topics through rosbridge,
+proven against a ROS 2 Jazzy testbed. It serves http on loopback only, and has no safety envelope yet (#264): put
+nothing on the door that moves a real robot until that slice lands.
 
 ## Try it
 
@@ -28,25 +29,70 @@ machine, with the same settings:
 best-robot approve 8BB9-CB44
 ```
 
-Its next poll receives a key, and `get-robot-state` answers with the robot's name, status (`idle`, `moving`,
+Its next poll receives a key, and `get-robot-state` answers with the fake robot's name, status (`idle`, `moving`,
 `fault`), pose in a named frame and charge. When the robot does not answer, the query is refused with 503
 `ROBOT_UNREACHABLE`. When it reports a pose number or a charge that is not finite, or a charge outside 0 to 100,
 the query is refused with 502 `ROBOT_STATE_INVALID`, naming the field. It never serves a value its schema forbids.
+
+### In front of a ROS 2 robot
+
+The robot runs rosbridge 2.x (`ros-jazzy-rosbridge-server` or newer: actions arrived in 2.0). A config file says
+which of its actions and topics the door exposes:
+
+```toml
+rosbridge = "ws://127.0.0.1:9090"
+
+[[skills]]
+name = "navigate-to-pose"            # the command's name on the door, kebab-case
+action = "/navigate_to_pose"
+type = "nav2_msgs/action/NavigateToPose"
+description = "Drives to a pose in the map frame."
+
+[[topics]]
+name = "battery"                     # read as the query get-battery
+topic = "/battery_state"
+type = "sensor_msgs/msg/BatteryState"
+description = "The battery's state; percentage is 0 to 1."
+```
+
+```bash
+BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG=robot.toml best-robot
+```
+
+At start the door asks rosapi for each type and generates the schemas from it. A type rosapi doesn't know, or a
+rosbridge that doesn't answer within fifteen seconds, stops it with the reason. The door then offers:
+
+- **Each skill as a command** whose data is the action's goal. A goal with a field the type lacks is refused with a
+  400 naming it, before anything reaches the robot. The run is told as events under the command's correlation id:
+  `<Skill>Progressed` with each feedback, then one of `<Skill>Succeeded`, `<Skill>Aborted` or `<Skill>Canceled`
+  (with the result), or `<Skill>Refused` (with why the robot never started it: rejected, no action server).
+- **`cancel-skill`**, naming the id of the command that started a run. Only that run's sender can cancel it. It ends
+  in `SkillCancelRequested`, and the run's own event says how it ended; with no such run in flight, it ends in
+  `SkillCancelRefused`.
+- **Each topic as a query**, `get-<name>`: the latest message and when it arrived, both null until one has.
+
+A lost rosbridge is reconnected a second later. A run it cut short ends in `CommandFailed`, since the robot may still
+be running it. A command the door was stopped during also ends in `CommandFailed` at the next start, and is never sent
+again: a goal sent twice moves a robot twice.
 
 | Variable | Default | What it is |
 |---|---|---|
 | `BEST_ROBOT_LISTEN` | `127.0.0.1:7780` | Where the door listens, with a port other than 0. Loopback only: off it the key would travel in the clear, and the door refuses to start. |
 | `BEST_ROBOT_ENDPOINT` | `http://<listen>` | The base URL agents reach it at. An https proxy on this machine sets it to its own address. |
 | `BEST_ROBOT_DATA` | `~/.best-robot` | The admin token, the credentials (hashes only) and the event log. |
-| `BEST_ROBOT_ROBOT` | `fake` | The robot behind the door. `fake` answers with a fixed state and moves nothing. |
+| `BEST_ROBOT_ROBOT` | `fake` | The robot behind the door. `fake` answers with a fixed state and moves nothing; `rosbridge` is a ROS 2 robot. |
+| `BEST_ROBOT_CONFIG` | none | With `rosbridge`, the config file above. |
 
 ## Layout
 
 | Crate | What it owns |
 |---|---|
-| `crates/robot` | The `Robot` abstraction the door depends on, its state types, and the fake. It knows nothing of JSON, HTTP or ROS. |
-| `crates/best-robot` | The binary. `main.rs` is the composition root that chooses the robot adapter. `settings` reads the environment, `approver` admits on the machine's admin token, `surface` holds the catalogue and the wire shape next to its schema, `door` puts best-peer's door around them, and `approve` is the owner's command. |
+| `crates/robot` | The robot as three narrow ports the door depends on: `Robot` (state), `Skills` (run, progress, outcome, cancel) and `Topics` (latest message). Also their fakes. It knows nothing of HTTP or ROS. |
+| `crates/rosbridge` | The ROS 2 adapter for `Skills` and `Topics`: the config, schemas generated from rosapi's typedefs, and one rosbridge websocket kept open. |
+| `crates/best-robot` | The binary. `main.rs` is the composition root that chooses each part's adapter. `settings` reads the environment, `approver` admits on the machine's admin token, `surface` turns the parts into the catalogue (state, skills, topics, each with its wire shape next to its schema), `door` puts best-peer's door around them, and `approve` is the owner's command. |
 
 ## Gate
 
-`scripts/gate.sh all` (Git Bash on Windows) ends in `GATE GREEN` or `GATE RED`. CI runs the same script.
+`scripts/gate.sh all` (Git Bash on Windows) ends in `GATE GREEN` or `GATE RED`. CI runs the same script. Its
+rosbridge lane needs Docker: it builds `testbed/rosbridge` (ROS 2 Jazzy, rosbridge, a test action and a test topic)
+and drives the door over it.

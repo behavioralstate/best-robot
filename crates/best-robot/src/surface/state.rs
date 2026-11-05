@@ -1,18 +1,13 @@
-//! What the door offers, built over a [`Robot`] it is handed: the catalogue, and the robot's state as the agent reads
-//! it. The wire shape lives here, next to its schema, so the robot abstraction knows nothing of JSON.
+//! `get-robot-state`: the robot's state as the agent reads it, its wire shape next to its schema.
 
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use best_peer_door::{BestError, Catalogue, QueryDef};
+use best_peer_door::{BestError, QueryDef};
 use robot::{Robot, State};
 use serde_json::{json, Value};
 
-pub fn catalogue(robot: Arc<dyn Robot>) -> Catalogue {
-    Catalogue::new().query(robot_state(robot))
-}
-
-fn robot_state(robot: Arc<dyn Robot>) -> QueryDef {
+pub fn query(robot: Arc<dyn Robot>) -> QueryDef {
     QueryDef {
         schema: "get-robot-state".into(),
         version: "1.0".into(),
@@ -116,7 +111,7 @@ mod tests {
     }
 
     async fn ask(robot: Arc<dyn Robot>) -> Result<Value, BestError> {
-        let def = robot_state(robot);
+        let def = query(robot);
         (def.handler)(anyone(), HashMap::new()).await
     }
 

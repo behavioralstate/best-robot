@@ -8,12 +8,14 @@ repository.workspace = true
 
 [dependencies]
 robot = { path = "../robot" }
+rosbridge = { path = "../rosbridge" }
 # The door is best-peer's, written from the spec text, pinned to a release: a change it needs is made there first.
 best-peer-door = { git = "https://github.com/behavioralstate/best-peer", tag = "v0.0.35" }
 async-trait = { workspace = true }
 # The version the door's router is built on.
 axum = "0.7"
 serde_json = { workspace = true }
+time = { version = "0.3", features = ["formatting"] }
 tokio = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -22,3 +24,5 @@ ureq = { version = "3", default-features = false, features = ["json"] }
 [dev-dependencies]
 jsonschema = { version = "0.58", default-features = false }
 tempfile = "3"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
