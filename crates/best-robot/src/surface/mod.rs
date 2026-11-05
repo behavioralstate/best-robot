@@ -101,6 +101,7 @@ mod tests {
             goal: json!({ "type": "object" }),
             feedback: json!({ "type": "object" }),
             result: json!({ "type": "object" }),
+            target: None,
         }
     }
 

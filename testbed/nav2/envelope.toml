@@ -1,0 +1,20 @@
+# The owner's bounds on the simulated TurtleBot3 (BEST_ROBOT_ENVELOPE), for the gate's nav2 lane and scripts/sim.sh:
+# the arena inside the world's walls as the fence, the centre pillar as a forbidden zone, and a speed ceiling above
+# Nav2's own 0.5 m/s, so a run that goes faster than its planner allows is stopped.
+frame = "map"
+geofence = [[-2.4, -2.4], [2.4, -2.4], [2.4, 2.4], [-2.4, 2.4]]
+
+[[zones]]
+name = "centre-pillar"
+polygon = [[-0.35, -0.35], [0.35, -0.35], [0.35, 0.35], [-0.35, 0.35]]
+
+[position]
+topic = "pose"
+x = "/pose/pose/position/x"
+y = "/pose/pose/position/y"
+
+[speed]
+max = 0.6
+topic = "odom"
+x = "/twist/twist/linear/x"
+y = "/twist/twist/linear/y"

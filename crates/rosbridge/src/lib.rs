@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use robot::{Outcome, Progress, SkillSpec, Skills, Snapshot, TopicSpec, Topics, Unreachable};
+use robot::{Outcome, Progress, SkillSpec, Skills, Snapshot, Target, TopicSpec, Topics, Unreachable};
 use serde_json::{json, Value};
 
 use client::Client;
@@ -50,12 +50,33 @@ impl Rosbridge {
         client.connected(CONNECT_WITHIN).await?;
         let mut skills = Vec::new();
         for s in &config.skills {
+            let goal = describe(&client, "/rosapi/action_goal_details", &s.action_type, Way::In).await?;
+            let target = s.target.as_ref().map(|t| Target {
+                frame: t.frame.clone(),
+                x: t.x.clone(),
+                y: t.y.clone(),
+            });
+            if let Some(t) = &target {
+                for (field, pointer, kind) in [
+                    ("frame", &t.frame, "string"),
+                    ("x", &t.x, "number"),
+                    ("y", &t.y, "number"),
+                ] {
+                    if schema::at(&goal, pointer)["type"] != kind {
+                        return Err(Unreachable(format!(
+                            "skill {}: target.{field} {pointer} is not a {kind} field of {}'s goal",
+                            s.name, s.action_type
+                        )));
+                    }
+                }
+            }
             skills.push(SkillSpec {
                 name: s.name.clone(),
                 description: s.description.clone(),
-                goal: describe(&client, "/rosapi/action_goal_details", &s.action_type, Way::In).await?,
+                goal,
                 feedback: describe(&client, "/rosapi/action_feedback_details", &s.action_type, Way::Out).await?,
                 result: describe(&client, "/rosapi/action_result_details", &s.action_type, Way::Out).await?,
+                target,
             });
         }
         let mut topics = Vec::new();

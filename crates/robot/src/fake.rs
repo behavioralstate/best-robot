@@ -145,10 +145,11 @@ impl Skills for FakeSkills {
     }
 }
 
-/// Topics whose latest messages are the ones it was given.
+/// Topics whose latest messages are the ones it was given: dated long ago, or, for a live one, just now on every read,
+/// as a topic the robot keeps publishing.
 pub struct FakeTopics {
     specs: Vec<TopicSpec>,
-    latest: HashMap<String, Value>,
+    latest: HashMap<String, (Value, bool)>,
 }
 
 impl FakeTopics {
@@ -160,7 +161,12 @@ impl FakeTopics {
     }
 
     pub fn with(mut self, topic: &str, message: Value) -> Self {
-        self.latest.insert(topic.into(), message);
+        self.latest.insert(topic.into(), (message, false));
+        self
+    }
+
+    pub fn live(mut self, topic: &str, message: Value) -> Self {
+        self.latest.insert(topic.into(), (message, true));
         self
     }
 }
@@ -171,9 +177,13 @@ impl Topics for FakeTopics {
     }
 
     fn latest(&self, topic: &str) -> Option<Snapshot> {
-        self.latest.get(topic).map(|m| Snapshot {
+        self.latest.get(topic).map(|(m, live)| Snapshot {
             message: m.clone(),
-            received_at: SystemTime::UNIX_EPOCH,
+            received_at: if *live {
+                SystemTime::now()
+            } else {
+                SystemTime::UNIX_EPOCH
+            },
         })
     }
 }

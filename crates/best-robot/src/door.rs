@@ -1,23 +1,63 @@
 //! The door over a robot: best-peer's BEST surface, with this door's catalogue, its own approver and its data
-//! folder, served on a listener the caller binds.
+//! folder, the robot's skills behind the owner's guard and the owner's routes beside it, served on a listener the
+//! caller binds.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use best_peer_door::{Auth, Catalogue, Door, EventLog};
+use best_peer_door::{Auth, Catalogue, Door, EventLog, LocalApprover};
+use robot::Skills;
 use serde_json::json;
 
 use crate::approver::OwnerApprover;
+use crate::guard::{envelope::Envelope, hold::Hold, Guard};
+use crate::owner::{self, Owner};
 use crate::settings::Settings;
+use crate::surface::{self, Parts};
 
 /// The service key in the manifest, and the `source` of every event.
 const SERVICE: &str = "io.best.agents";
 
-/// The door over `catalogue`, described as `description`, with what a run before a restart left unfinished closed as
-/// failed.
-pub fn open(settings: &Settings, description: &str, catalogue: Catalogue) -> std::io::Result<Door> {
+/// The door over the robot's `parts` and the owner's routes: its skills, when it has any, behind a guard that holds
+/// them to `envelope` and to the owner's hold, each skill a scope a credential may be approved for.
+pub fn build(
+    settings: &Settings,
+    mut parts: Parts,
+    envelope: Option<Envelope>,
+) -> Result<(Door, axum::Router), String> {
+    let kept = |e: std::io::Error| format!("cannot keep the door's data in {}: {e}", settings.data.display());
+    let hold = Arc::new(Hold::open(&settings.data).map_err(kept)?);
+    let guard = match parts.skills.take() {
+        Some(skills) => Some(Arc::new(Guard::new(
+            skills,
+            envelope,
+            parts.topics.clone(),
+            hold.clone(),
+        )?)),
+        None if envelope.is_some() => {
+            return Err("BEST_ROBOT_ENVELOPE bounds a robot's skills, and this robot offers none".into())
+        }
+        None => None,
+    };
+    parts.skills = guard.clone().map(|g| g as Arc<dyn Skills>);
+    let scopes: Vec<String> = parts
+        .skills
+        .iter()
+        .flat_map(|s| s.skills().iter().map(|spec| spec.name.clone()))
+        .collect();
+    let description = surface::describe(&parts);
+    let catalogue = surface::catalogue(parts)?;
+    let door = open(settings, &description, &scopes, catalogue).map_err(kept)?;
+    let approver = Arc::new(LocalApprover::open(&settings.data).map_err(kept)?);
+    Ok((door, owner::routes(Owner { hold, guard, approver })))
+}
+
+/// The door over `catalogue`, described as `description`, its credentials approved for any of `scopes`, with what a
+/// run before a restart left unfinished closed as failed.
+fn open(settings: &Settings, description: &str, scopes: &[String], catalogue: Catalogue) -> std::io::Result<Door> {
     let approver = OwnerApprover::open(&settings.data)?;
-    let auth = Auth::open(&settings.data, &settings.endpoint, Box::new(approver))?;
+    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let auth = Auth::open(&settings.data, &settings.endpoint, Box::new(approver))?.with_scopes(&scopes);
     let log = EventLog::open(&settings.data)?;
     let door = Door::new(
         &settings.endpoint,
@@ -43,13 +83,14 @@ fn settle(door: &Door) {
     }
 }
 
-/// Serves the door on `listener` until `stop` resolves.
+/// Serves the door on `listener`, with the owner's routes beside it, until `stop` resolves.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     door: Door,
+    owner: axum::Router,
     stop: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = best_peer_door::router(Arc::new(door));
+    let app = best_peer_door::router(Arc::new(door)).merge(owner);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(stop)
         .await
@@ -70,6 +111,7 @@ mod tests {
             endpoint: "http://127.0.0.1:7780".into(),
             data: dir.path().to_path_buf(),
             robot: RobotKind::Fake,
+            envelope: None,
         };
         {
             let log = EventLog::open(dir.path()).unwrap();
@@ -85,13 +127,14 @@ mod tests {
             goal: json!({ "type": "object" }),
             feedback: json!({ "type": "object" }),
             result: json!({ "type": "object" }),
+            target: None,
         }]));
         let parts = crate::surface::Parts {
             state: None,
             skills: Some(skills.clone()),
             topics: None,
         };
-        let door = open(&settings, "test", crate::surface::catalogue(parts).unwrap()).unwrap();
+        let door = open(&settings, "test", &[], crate::surface::catalogue(parts).unwrap()).unwrap();
         assert!(door.log.unfinished().is_empty());
         assert!(skills.goals().is_empty(), "the goal was not sent again");
         let filter = Filter {

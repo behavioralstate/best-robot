@@ -25,6 +25,18 @@ pub struct SkillConfig {
     #[serde(rename = "type")]
     pub action_type: String,
     pub description: String,
+    /// For an action that takes the robot somewhere: where its goal names that place, so the owner's bounds can be
+    /// held to it.
+    pub target: Option<TargetConfig>,
+}
+
+/// JSON Pointers into a goal: the frame of the place it names, and its x and y.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TargetConfig {
+    pub frame: String,
+    pub x: String,
+    pub y: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -78,6 +90,18 @@ impl Config {
             let parts: Vec<&str> = ros_type.split('/').collect();
             if parts.len() != 3 || parts[1] != middle || parts.iter().any(|p| p.is_empty()) {
                 return Err(format!("{at}: type {ros_type:?} is not package/{middle}/Name"));
+            }
+        }
+        for s in &config.skills {
+            if let Some(t) = &s.target {
+                for (field, pointer) in [("frame", &t.frame), ("x", &t.x), ("y", &t.y)] {
+                    if !pointer.starts_with('/') {
+                        return Err(format!(
+                            "skills {:?}: target.{field} {pointer:?} is not a JSON Pointer into the goal, such as /pose/pose/position/x",
+                            s.name
+                        ));
+                    }
+                }
             }
         }
         Ok(config)
@@ -135,6 +159,14 @@ description = "The battery's state."
                 "package/action/Name",
             ),
             (GOOD.replace("action = ", "acton = "), "acton"),
+            (
+                GOOD.replace(
+                    "description = \"Computes",
+                    "target = { frame = \"/f\", x = \"x\", y = \"/y\" }
+description = \"Computes",
+                ),
+                "target.x",
+            ),
         ];
         for (text, said) in cases {
             let e = Config::parse(&text).unwrap_err();

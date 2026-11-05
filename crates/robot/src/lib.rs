@@ -9,7 +9,7 @@ mod fake;
 mod skills;
 mod topics;
 pub use fake::{Fake, FakeSkills, FakeTopics};
-pub use skills::{Outcome, Progress, SkillSpec, Skills};
+pub use skills::{place, Outcome, Progress, Refusal, SkillSpec, Skills, Target};
 pub use topics::{Snapshot, TopicSpec, Topics};
 
 /// A robot the door speaks for.

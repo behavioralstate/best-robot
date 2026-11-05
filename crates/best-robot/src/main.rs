@@ -1,9 +1,11 @@
 //! best-robot: a BEST door in front of a robot. This file is the composition root: it reads the settings, chooses
 //! the adapters for the robot's parts and hands them to the door; nothing below it knows which robot it is.
 
-mod approve;
 mod approver;
+mod cli;
 mod door;
+mod guard;
+mod owner;
 mod settings;
 mod surface;
 #[cfg(test)]
@@ -14,32 +16,64 @@ use std::sync::Arc;
 use settings::{RobotKind, Settings};
 use surface::Parts;
 
-const USAGE: &str = "usage: best-robot [serve] | best-robot approve <code> | best-robot --version
+const USAGE: &str = "usage: best-robot [serve] | approve <code> [--may <skills>] [--expires <span>] | hold [--now] [--reason <text>] | release | --version
 
   serve            serve the door (the default)
-  approve <code>   admit the agent that showed you this code
+  approve <code>   admit the agent that showed you this code: for every skill, or those --may names (comma-separated),
+                   until --expires ends its key (90s, 30m, 2h, 7d)
+  hold             take the robot over: no skill starts until release; --now stops the runs in flight too, each told
+                   to its holder; --reason says why, to them
+  release          give the robot back
 
 settings, from the environment:
   BEST_ROBOT_LISTEN    where the door listens, on loopback (default 127.0.0.1:7780)
   BEST_ROBOT_ENDPOINT  the base URL agents reach it at (default http://<listen>)
   BEST_ROBOT_DATA      where it keeps its credentials and event log (default ~/.best-robot)
   BEST_ROBOT_ROBOT     the robot behind it: fake (default) or rosbridge
-  BEST_ROBOT_CONFIG    with rosbridge: the file naming the rosbridge and the skills and topics to expose";
+  BEST_ROBOT_CONFIG    with rosbridge: the file naming the rosbridge and the skills and topics to expose
+  BEST_ROBOT_ENVELOPE  the owner's bounds on the skills: a geofence, forbidden zones and a speed ceiling";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None | Some("serve") => serve(settings()),
-        Some("approve") => match args.get(1) {
-            Some(code) => match approve::approve(&settings(), code) {
-                Ok(line) => println!("{line}"),
-                Err(why) => fail(&why),
-            },
-            None => fail(USAGE),
-        },
+        Some("approve") => {
+            let code = args
+                .get(1)
+                .filter(|c| !c.starts_with("--"))
+                .unwrap_or_else(|| fail(USAGE));
+            let (may, expires) = (flag(&args[2..], "--may"), flag(&args[2..], "--expires"));
+            let expires_in = expires.map(|e| cli::seconds(e).unwrap_or_else(|why| fail(&why)));
+            done(cli::approve(&settings(), code, cli::Grant { may, expires_in }));
+        }
+        Some("hold") => {
+            let now = args[1..].iter().any(|a| a == "--now");
+            done(cli::hold(&settings(), now, flag(&args[1..], "--reason")));
+        }
+        Some("release") => done(cli::release(&settings())),
         Some("--version" | "-V") => println!("best-robot {}", env!("CARGO_PKG_VERSION")),
         Some("--help" | "-h" | "help") => println!("{USAGE}"),
         Some(other) => fail(&format!("unknown command {other:?}\n\n{USAGE}")),
+    }
+}
+
+/// The value after `name` in `args`, when it is there.
+fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let at = args.iter().position(|a| a == name)?;
+    match args.get(at + 1) {
+        Some(v) if !v.starts_with("--") => Some(v),
+        _ => fail(&format!(
+            "{name} needs a value
+
+{USAGE}"
+        )),
+    }
+}
+
+fn done(said: Result<String, String>) {
+    match said {
+        Ok(line) => println!("{line}"),
+        Err(why) => fail(&why),
     }
 }
 
@@ -78,15 +112,14 @@ fn serve(settings: Settings) {
         .init();
     let runtime = tokio::runtime::Runtime::new().unwrap_or_else(|e| fail(&format!("cannot start: {e}")));
     runtime.block_on(async {
-        let parts = parts(&settings.robot).await.unwrap_or_else(|why| fail(&why));
-        let description = surface::describe(&parts);
-        let catalogue = surface::catalogue(parts).unwrap_or_else(|why| fail(&why));
-        let door = door::open(&settings, &description, catalogue).unwrap_or_else(|e| {
-            fail(&format!(
-                "cannot keep the door's data in {}: {e}",
-                settings.data.display()
-            ))
+        let envelope = settings.envelope.as_ref().map(|path| {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| fail(&format!("cannot read BEST_ROBOT_ENVELOPE={}: {e}", path.display())));
+            guard::envelope::Envelope::parse(&text)
+                .unwrap_or_else(|why| fail(&format!("BEST_ROBOT_ENVELOPE={}: {why}", path.display())))
         });
+        let parts = parts(&settings.robot).await.unwrap_or_else(|why| fail(&why));
+        let (door, owner) = door::build(&settings, parts, envelope).unwrap_or_else(|why| fail(&why));
         let listener = tokio::net::TcpListener::bind(settings.listen)
             .await
             .unwrap_or_else(|e| fail(&format!("cannot listen on {}: {e}", settings.listen)));
@@ -98,7 +131,7 @@ fn serve(settings: Settings) {
         let stop = async {
             tokio::signal::ctrl_c().await.ok();
         };
-        door::serve(listener, door, stop)
+        door::serve(listener, door, owner, stop)
             .await
             .unwrap_or_else(|e| fail(&format!("the door stopped: {e}")));
     });

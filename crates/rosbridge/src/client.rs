@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 
+/// The least time between two messages rosbridge sends of one topic, in milliseconds: the door keeps a topic's latest
+/// message, and the robot may publish odometry fifty times a second.
+const THROTTLE_MS: u64 = 100;
 /// How long one connection attempt may take.
 const CONNECT_FOR: Duration = Duration::from_secs(5);
 /// How often the socket is pinged.
@@ -126,7 +129,7 @@ impl Client {
         let (mut sink, mut stream) = socket.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         for (topic, ty) in &self.topics {
-            let subscribe = json!({ "op": "subscribe", "id": format!("best-robot-{topic}"), "topic": topic, "type": ty, "queue_length": 1 });
+            let subscribe = json!({ "op": "subscribe", "id": format!("best-robot-{topic}"), "topic": topic, "type": ty, "queue_length": 1, "throttle_rate": THROTTLE_MS });
             let _ = tx.send(Message::text(subscribe.to_string()));
         }
         *self.out.lock().unwrap() = Some(tx);

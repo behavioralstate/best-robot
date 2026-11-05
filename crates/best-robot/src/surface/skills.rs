@@ -1,12 +1,16 @@
 //! Each skill as a command whose data is its goal, and its run as events: `<Skill>Progressed` with its feedback, at
-//! most one a second, then one of `<Skill>Succeeded`, `<Skill>Aborted`, `<Skill>Canceled` (with the result) or `<Skill>Refused` (with
-//! why the robot never started it). `cancel-skill` ends a run its own sender started.
+//! most one a second, then one of `<Skill>Succeeded`, `<Skill>Aborted`, `<Skill>Canceled` (with the result),
+//! `<Skill>Refused` (with why the robot never started it) or `<Skill>Stopped` (with why its guard ended it). A skill is
+//! also a scope: a credential approved for some scopes sends only those skills. `cancel-skill` ends a run its own
+//! sender started, whatever its scopes.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use best_peer_door::{Catalogue, CommandDef, Emitter, Envelope, EventDef};
-use robot::{Outcome, SkillSpec, Skills};
+use axum::http::StatusCode;
+use best_peer_door::auth::Credential;
+use best_peer_door::{BestError, Catalogue, CommandDef, Emitter, Envelope, EventDef};
+use robot::{Outcome, Refusal, SkillSpec, Skills};
 use serde_json::{json, Value};
 
 use super::pascal;
@@ -19,7 +23,7 @@ const VERSION: &str = "1.0";
 /// event is a fact kept for good, not a sample.
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// The suffixes of a skill's events, in the order a run can produce them.
-const SUFFIXES: [&str; 5] = ["Progressed", "Succeeded", "Aborted", "Canceled", "Refused"];
+const SUFFIXES: [&str; 6] = ["Progressed", "Succeeded", "Aborted", "Canceled", "Refused", "Stopped"];
 
 /// The types the skill `name` answers to: its command's, then its events'.
 pub fn types(name: &str) -> Vec<String> {
@@ -52,7 +56,7 @@ pub fn add(mut c: Catalogue, skills: Arc<dyn Skills>) -> Catalogue {
 }
 
 /// The outcome events of a skill, by suffix: what each carries.
-fn outcomes(spec: &SkillSpec) -> [(&'static str, &'static str, Value); 5] {
+fn outcomes(spec: &SkillSpec) -> [(&'static str, &'static str, Value); 6] {
     [
         (
             "Progressed",
@@ -78,6 +82,11 @@ fn outcomes(spec: &SkillSpec) -> [(&'static str, &'static str, Value); 5] {
             "Refused",
             "The robot never started the goal; the reason says why.",
             json!({ "reason": { "type": "string" } }),
+        ),
+        (
+            "Stopped",
+            "The robot's guard ended the run, not the agent: its owner took it over, or it left the bounds its owner set. The reason says which; the result is what the robot had.",
+            json!({ "reason": { "type": "string" }, "result": spec.result }),
         ),
     ]
 }
@@ -120,7 +129,13 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
         produces: outcomes(spec).iter().map(|(suffix, ..)| named(suffix)).collect(),
         completes: SUFFIXES[1..].iter().map(|s| named(s)).collect(),
         impact: None,
-        admit: None,
+        admit: Some({
+            let (skills, name) = (skills.clone(), name.clone());
+            Arc::new(move |envelope: Envelope, who: Credential, _key: String| {
+                let admitted = may(&who, &name).and_then(|()| skills.check(&name, &envelope.data).map_err(refused));
+                Box::pin(async move { admitted })
+            })
+        }),
         handler: Arc::new(move |envelope: Envelope, emitter: Emitter| {
             let (skills, name, ty) = (skills.clone(), name.clone(), ty.clone());
             Box::pin(async move {
@@ -137,6 +152,9 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
                     Ok(Outcome::Aborted(r)) => emitter.emit(&format!("{ty}Aborted"), json!({ "result": r })),
                     Ok(Outcome::Canceled(r)) => emitter.emit(&format!("{ty}Canceled"), json!({ "result": r })),
                     Ok(Outcome::Refused(why)) => emitter.emit(&format!("{ty}Refused"), json!({ "reason": why })),
+                    Ok(Outcome::Stopped { reason, result }) => {
+                        emitter.emit(&format!("{ty}Stopped"), json!({ "reason": reason, "result": result }))
+                    }
                     Err(e) => emitter.emit(
                         "CommandFailed",
                         json!({ "type": ty, "reason": format!("{e}. It may have started the goal before that and still be running it: read what the robot reports before sending the goal again, under a new command id") }),
@@ -145,6 +163,32 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
             })
         }),
     }
+}
+
+/// A credential approved for some scopes sends only the skills they name, and is told how to get one that may.
+fn may(who: &Credential, skill: &str) -> Result<(), BestError> {
+    if who.grant.allows(skill) {
+        return Ok(());
+    }
+    Err(BestError::new(
+        StatusCode::FORBIDDEN,
+        "FORBIDDEN",
+        format!(
+            "this credential may not {skill}: it was approved for {}; ask whoever controls the robot to approve one that may (best-robot approve <code> --may {skill})",
+            who.grant.said()
+        ),
+    )
+    .with_details(json!({ "needs": skill, "may": who.grant.scopes })))
+}
+
+/// A goal the robot's guard would not take, refused at the door: 409 when only now is wrong, 400 when the goal is.
+fn refused(r: Refusal) -> BestError {
+    let status = if r.now {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    BestError::new(status, r.code, r.message).with_details(r.details)
 }
 
 /// A run's feedback as events, at most one each [`PROGRESS_EVERY`]: one that comes sooner waits for the window to
@@ -247,6 +291,7 @@ mod tests {
             goal: json!({ "type": "object", "properties": { "to": { "type": "integer" } }, "additionalProperties": false }),
             feedback: json!({ "type": "object" }),
             result: json!({ "type": "object" }),
+            target: None,
         }
     }
 

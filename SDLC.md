@@ -31,8 +31,12 @@
   robot by hand, with the proof on the slice's issue. No real robot is ever needed by CI.
 - **Never send a goal twice.** A command the door stopped during ends in `CommandFailed` at the next start and is
   never run again; a run whose rosbridge was lost ends the same way, since the robot may still be running it.
-- **Small and cohesive.** A module owns one thing (the settings, the approver, each part of the surface, the door,
-  the approval command); the wire shape of a fact lives next to its schema. Nothing is added before a slice needs it.
+- **The owner bounds the robot, never an agent.** The envelope and the hold are read from the owner's file and set by
+  the owner's commands on the machine; no command on the door widens them. A change that lets a goal past them, or a
+  run go on after a breach, is proven in the nav2 lane. They sit above the robot's own limits and its physical
+  emergency stop, never in their place.
+- **Small and cohesive.** A module owns one thing (the settings, the approver, each part of the surface, the guard,
+  the door, the owner's routes, the owner's commands); the wire shape of a fact lives next to its schema. Nothing is added before a slice needs it.
 - Facts are events; an event is versioned, never mutated; a redelivery is idempotent; nothing is clamped silently.
 - The README's "Try it" is the operator's path, kept true by the change that moves it.
 
@@ -44,7 +48,9 @@
   served door, anonymous and signed in through the device flow and the real `best-robot approve`, then the rosbridge
   lane: the ROS 2 testbed in a container, the adapter's testbed tests, the door over it validated signed in, and a goal
   sent through the door and read back as events; then the nav2 lane: the simulated robot driven through the door to a
-  pose and back, out of the map and cancelled on the way, each read back as events. It ends in `GATE GREEN` or
+  pose and back, out of the map and cancelled on the way, each read back as events, then behind the owner's envelope:
+  a goal outside the geofence and one in a forbidden zone refused, a key scoped to one skill refused another, and
+  `best-robot hold --now` stopping a navigation, held across a restart, until `best-robot release`. It ends in `GATE GREEN` or
   `GATE RED`; CI runs the same script.
 
 ## 4. Ship

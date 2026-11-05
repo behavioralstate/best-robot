@@ -13,6 +13,8 @@ pub struct Settings {
     pub endpoint: String,
     pub data: PathBuf,
     pub robot: RobotKind,
+    /// The owner's bounds on the robot's skills, when set.
+    pub envelope: Option<PathBuf>,
 }
 
 /// The robots this build can stand in front of.
@@ -73,6 +75,10 @@ impl Settings {
             endpoint: endpoint.trim_end_matches('/').into(),
             data,
             robot,
+            // Set and empty is none, as a script that passes it on unset says.
+            envelope: var("BEST_ROBOT_ENVELOPE")
+                .filter(|e| !e.trim().is_empty())
+                .map(PathBuf::from),
         })
     }
 }
@@ -94,6 +100,16 @@ mod tests {
         assert_eq!(s.endpoint, format!("http://{DEFAULT_LISTEN}"));
         assert_eq!(s.data, PathBuf::from("/home/me").join(".best-robot"));
         assert_eq!(s.robot, RobotKind::Fake);
+    }
+
+    #[test]
+    fn an_envelope_set_empty_is_none() {
+        assert_eq!(read(&[]).unwrap().envelope, None);
+        assert_eq!(read(&[("BEST_ROBOT_ENVELOPE", "")]).unwrap().envelope, None);
+        assert_eq!(
+            read(&[("BEST_ROBOT_ENVELOPE", "/etc/fence.toml")]).unwrap().envelope,
+            Some(PathBuf::from("/etc/fence.toml"))
+        );
     }
 
     #[test]

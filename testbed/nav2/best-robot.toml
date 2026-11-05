@@ -5,10 +5,23 @@ rosbridge = "ws://127.0.0.1:9092"
 name = "navigate-to"
 action = "/navigate_to_pose"
 type = "nav2_msgs/action/NavigateToPose"
+target = { frame = "/pose/header/frame_id", x = "/pose/pose/position/x", y = "/pose/pose/position/y" }
 description = "Drives the robot to a pose in the map frame, avoiding obstacles. When it stops short, the result's error_code says why: 204 the goal is outside the map, 206 the goal is in an obstacle, 208 no path reaches it, 203 or 205 the robot itself is off the map or blocked, 105 or 106 it could not make progress, any other 1xx or 2xx a fault in its planning or control."
+
+[[skills]]
+name = "spin"
+action = "/spin"
+type = "nav2_msgs/action/Spin"
+description = "Turns the robot in place by target_yaw radians, within time_allowance; it goes nowhere, so its owner's geofence does not bound it."
 
 [[topics]]
 name = "pose"
 topic = "/amcl_pose"
 type = "geometry_msgs/msg/PoseWithCovarianceStamped"
 description = "Where the robot believes it is in the map frame, and how sure it is."
+
+[[topics]]
+name = "odom"
+topic = "/odom"
+type = "nav_msgs/msg/Odometry"
+description = "The robot's odometry: where its wheels say it went, and how fast it moves now."

@@ -14,9 +14,11 @@ best-peer-door = { git = "https://github.com/behavioralstate/best-peer", tag = "
 async-trait = { workspace = true }
 # The version the door's router is built on.
 axum = "0.7"
+serde = { workspace = true }
 serde_json = { workspace = true }
 time = { version = "0.3", features = ["formatting"] }
 tokio = { workspace = true }
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "3", default-features = false, features = ["json"] }

@@ -59,6 +59,11 @@ pub fn integers(value: Value, schema: &Value) -> Value {
     }
 }
 
+/// The schema of the field a JSON Pointer names in a value `schema` describes, or null when there is none.
+pub fn at<'a>(schema: &'a Value, pointer: &str) -> &'a Value {
+    pointer.split('/').skip(1).fold(schema, |s, key| &s["properties"][key])
+}
+
 fn object(t: &Typedef, all: &[Typedef], way: Way, depth: usize) -> Result<Value, String> {
     if depth > 32 {
         return Err(format!("{} nests deeper than 32 types", t.name));
@@ -190,6 +195,17 @@ mod tests {
             &json!({ "properties": { "order": { "type": "integer" } } }),
         );
         assert_eq!(big.to_string(), r#"{"order":10000000000000000000}"#);
+    }
+
+    #[test]
+    fn a_pointer_finds_the_field_it_names() {
+        let t = typedefs(json!([
+            { "type": "pkg/Root", "fieldnames": ["pose"], "fieldtypes": ["pkg/Pose"], "fieldarraylen": [-1] },
+            { "type": "pkg/Pose", "fieldnames": ["x"], "fieldtypes": ["float64"], "fieldarraylen": [-1] }
+        ]));
+        let s = of(&t, Way::In).unwrap();
+        assert_eq!(at(&s, "/pose/x")["type"], "number");
+        assert!(at(&s, "/pose/y").is_null());
     }
 
     #[test]

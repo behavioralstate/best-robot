@@ -4,8 +4,10 @@
 # `best-robot approve`; then the rosbridge lane, the same door over a real ROS 2 stack in a container (testbed/rosbridge):
 # the adapter's testbed tests, best-validate signed in, and a goal sent through the door and read back as events; then
 # the nav2 lane, the door driving a simulated TurtleBot3 under Nav2 (testbed/nav2) to a pose and back, out of the map,
-# and cancelled on the way. The last line is GATE GREEN or GATE RED, and nothing else is a pass. CI runs this same
-# script.
+# and cancelled on the way; then, behind the owner's envelope (testbed/nav2/envelope.toml), goals outside the geofence
+# and in a forbidden zone refused with the fix, a key approved for one skill refused another, and `best-robot hold
+# --now` stopping a navigation, kept across a restart of the door, until `best-robot release`. The last line is GATE
+# GREEN or GATE RED, and nothing else is a pass. CI runs this same script.
 #
 #   scripts/gate.sh [fmt|clippy|test|build|validate|rosbridge|nav2|all]      default: all
 #
@@ -50,11 +52,12 @@ wait_up() {  # pid url: the door this lane started answers its manifest within t
   echo "the door at $url did not answer"; return 1
 }
 field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[process.argv[1]]))' "$1"; }
-sign_in() {  # base: an agent signs in by the device flow, the person approves with the real `best-robot approve`
-  # (BEST_ROBOT_DATA and BEST_ROBOT_LISTEN set to the door's), and the key is printed for the lane to use.
-  local base="$1" device
+sign_in() {  # base [approve flags...]: an agent signs in by the device flow, the person approves with the real
+  # `best-robot approve` (BEST_ROBOT_DATA and BEST_ROBOT_LISTEN set to the door's) and the flags, and the key is
+  # printed for the lane to use.
+  local base="$1" device; shift
   device=$(curl -sf -X POST "$base/auth/device" -d client_id=gate -d connection=gate-robot -d "agent_label=the gate")
-  "$bin" approve "$(echo "$device" | field user_code)" >&2
+  "$bin" approve "$(echo "$device" | field user_code)" "$@" >&2
   curl -sf -X POST "$base/auth/token" -d grant_type=urn:ietf:params:oauth:grant-type:device_code \
     -d "device_code=$(echo "$device" | field device_code)" -d client_id=gate | field access_token
 }
@@ -84,6 +87,21 @@ send() {  # base key schema type id data: sends a command through the door as th
     "specversion": "1.0", "id": "'"$5"'", "source": "gate", "type": "'"$4"'", "datacontenttype": "application/json",
     "dataschema": "'"$1"'/commands/'"$3"'/1.0", "time": "2026-11-05T00:00:00Z", "data": '"$6"' }'
 }
+answer() {  # base key schema type id data: sends a command as send does, and prints the door's status and body.
+  local body; body=$(mktemp)
+  curl -s -o "$body" -w '%{http_code} ' -X POST "$1/commands" -H "X-Api-Key: $2" -H "Content-Type: application/json" -d '{
+    "specversion": "1.0", "id": "'"$5"'", "source": "gate", "type": "'"$4"'", "datacontenttype": "application/json",
+    "dataschema": "'"$1"'/commands/'"$3"'/1.0", "time": "2026-11-05T00:00:00Z", "data": '"$6"' }'
+  cat "$body"; rm -f "$body"
+}
+refused() {  # label status code: reads `answer`'s output from stdin, and fails unless the door refused with that status
+  # and error code; prints the message, the fix it names.
+  node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const at=s.indexOf(" "), status=s.slice(0,at), b=JSON.parse(s.slice(at+1)||"{}"), e=b.error||{};
+    console.log(process.argv[1]+":", status, e.code, "-", e.message);
+    if(status!==process.argv[2]||e.code!==process.argv[3]) { console.log(s); process.exit(1); }
+  })' "$1" "$2" "$3"
+}
 events_until() {  # base key correlation pattern seconds: the events under the correlation once one matches the pattern.
   local events=""
   for _ in $(seq 1 $(($5 * 4))); do
@@ -101,10 +119,11 @@ expect() {  # label js: reads events from stdin, prints their types, and fails u
     if(!eval(process.argv[2])) { console.log(JSON.stringify(last)); process.exit(1); }
   })' "$1" "$2"
 }
-door_over() {  # port config: starts the door over the rosbridge robot <config> names, on 127.0.0.1:<port>, as a job
-  # of the calling lane (so its trap stops it), with the lane's data folder, and waits until it answers.
+door_over() {  # port config [envelope]: starts the door over the rosbridge robot <config> names, on 127.0.0.1:<port>,
+  # behind the envelope when one is named, as a job of the calling lane (so its trap stops it, and $! is its pid),
+  # with the lane's data folder, and waits until it answers.
   export BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG="$2" BEST_ROBOT_DATA="$data" BEST_ROBOT_LISTEN="127.0.0.1:$1"
-  "$bin" &
+  BEST_ROBOT_ENVELOPE="${3:-}" "$bin" &
   wait_up $! "http://127.0.0.1:$1/.well-known/best"
 }
 
@@ -128,7 +147,9 @@ lane_rosbridge() (
 )
 
 # The door over the simulated robot (testbed/nav2: Gazebo, a TurtleBot3, Nav2): validated signed in, then driven
-# through the door to a pose and back, sent somewhere it cannot reach, and cancelled on the way, each told as events.
+# through the door to a pose and back, sent somewhere it cannot reach, and cancelled on the way, each told as events;
+# then restarted behind the owner's envelope, where the door refuses what the owner bounds, and the owner's hold
+# stops a run and outlives a restart.
 lane_nav2() (
   set -euo pipefail
   container=best-robot-gate-nav2
@@ -136,7 +157,7 @@ lane_nav2() (
   testbed_up nav2 "$container" 9093 'lifecycle_manager_navigation\]: .{0,20}Managed nodes are active' 300
   sed 's/:9092"/:9093"/' testbed/nav2/best-robot.toml > "$data/nav2.toml"
   base=http://127.0.0.1:7884
-  door_over 7884 "$data/nav2.toml"
+  door_over 7884 "$data/nav2.toml"; door=$!
   key=$(sign_in "$base")
   validate "$base" --api-key "$key" --auth-type apikey --auth-header X-Api-Key
   goal() { echo '{ "pose": { "header": { "frame_id": "map" }, "pose": { "position": { "x": '"$1"', "y": '"$2"' }, "orientation": { "w": 1 } } } }'; }
@@ -157,6 +178,25 @@ lane_nav2() (
   send "$base" "$key" cancel-skill CancelSkill gate-cancel '{ "command": "gate-cancelled" }'
   events_until "$base" "$key" gate-cancel 'SkillCancel(Requested|Refused)' 10 | expect "the cancel" 'last.type==="SkillCancelRequested"'
   events_until "$base" "$key" gate-cancelled "$ended" 60 | expect "cancelled on the way" 'last.type==="NavigateToCanceled"'
+
+  restart() { kill "$door"; wait "$door" 2>/dev/null || true; door_over 7884 "$data/nav2.toml" testbed/nav2/envelope.toml; door=$!; }
+  restart
+  answer "$base" "$key" navigate-to NavigateTo gate-fenced "$(goal 3.0 0.0)" | refused "outside the geofence" 400 OUTSIDE_GEOFENCE
+  answer "$base" "$key" navigate-to NavigateTo gate-zoned "$(goal 0.1 0.1)" | refused "in a forbidden zone" 400 IN_FORBIDDEN_ZONE
+  narrow=$(sign_in "$base" --may navigate-to)
+  answer "$base" "$narrow" spin Spin gate-spin '{ "target_yaw": 1.57, "time_allowance": { "sec": 10 } }'     | refused "a key for navigate-to alone, on spin" 403 FORBIDDEN
+
+  ended='NavigateTo(Succeeded|Aborted|Canceled|Refused|Stopped)|CommandFailed'
+  send "$base" "$narrow" navigate-to NavigateTo gate-held "$(goal 1.6 1.6)"
+  events_until "$base" "$narrow" gate-held NavigateToProgressed 30 >/dev/null
+  "$bin" hold --now --reason "the gate takes it over"
+  events_until "$base" "$narrow" gate-held "$ended" 60 | expect "stopped by the hold"     'last.type==="NavigateToStopped" && last.data.reason.includes("the gate takes it over")'
+  answer "$base" "$key" navigate-to NavigateTo gate-while-held "$(goal -2.0 -0.5)" | refused "while held" 409 HELD
+  restart
+  answer "$base" "$key" navigate-to NavigateTo gate-held-on "$(goal -2.0 -0.5)" | refused "held across a restart" 409 HELD
+  "$bin" release
+  send "$base" "$key" navigate-to NavigateTo gate-released "$(goal -2.0 -0.5)"
+  events_until "$base" "$key" gate-released "$ended" 120 | expect "released, and back" 'last.type==="NavigateToSucceeded"'
 )
 
 if wants validate; then
