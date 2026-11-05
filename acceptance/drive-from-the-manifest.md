@@ -85,7 +85,9 @@ This file records the run: how it was set up, what it showed, and the transcript
   - the second ended at x 2.03, y -0.24, 0.36 m from x 2.3, y 0, a distance this record measures from the reported
     pose.
 
-  The agent reported where the robot stopped, not the goal.
+  The agent took `NavigateToSucceeded` as arrival. After the second navigation it said the robot had reached
+  x 2.3, y 0. In its final table it gave the stop position for the second navigation only, x 2.03, y -0.24 with
+  0.2 m left.
 - The agent followed the runs in two ways:
   - with `sample_event_stream`, filtered by the command's correlation id;
   - with `get_events` for history.
