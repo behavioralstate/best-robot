@@ -165,9 +165,11 @@ message: one that names no number stops the door, saying which. Then:
   its number (NaN), or a position in another frame than the envelope's, stops the run: the door cancels it, again
   every half second until the robot ends it, and it ends in `<Skill>Stopped` with the reason, whether the robot
   reports it cancelled or aborted. The position is the latest the robot reported, however old: a localiser such as
-  AMCL reports only once the robot has moved, so the speed's two seconds are what catch a robot gone silent. A run
-  that starts with the robot already outside the bounds (pushed there by hand) goes on, since its goal is inside
-  them and is how the robot gets back; it is held to them once the robot reports itself inside.
+  AMCL reports only once the robot has moved, so the speed's two seconds are what catch a robot gone silent; a
+  position whose frame is left empty is taken in the envelope's. A run of a skill with a `target` that starts with
+  the robot already outside the bounds (pushed there by hand) goes on, since its goal is inside them and is how the
+  robot gets back; it is held to them once the robot reports itself inside. A skill without one is held from the
+  start.
 - A skill without a `target` is not held to the fence and zones by its goal, only by what the robot reports while it
   runs; the door warns at start naming each such skill.
 - A goal accepted before a hold or a change of bounds, refused as it starts, ends in `<Skill>Refused`; that command

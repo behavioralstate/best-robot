@@ -162,13 +162,17 @@ impl Guard {
         let (e, topics) = (self.envelope.as_ref()?, self.topics.as_ref()?);
         let p = e.position.as_ref()?;
         let s = topics.latest(&p.topic)?;
-        if let Some(frame) = s.message.pointer("/header/frame_id").and_then(Value::as_str) {
-            if frame != e.frame {
-                return Some(Place::Unheld(format!(
-                    "the robot reports where it is in frame {frame:?}, and the bounds its owner set are in {:?}, so they cannot be held",
-                    e.frame
-                )));
-            }
+        // A frame left empty (ROS's default) states none, so the envelope's is taken.
+        let frame = s
+            .message
+            .pointer("/header/frame_id")
+            .and_then(Value::as_str)
+            .filter(|f| !f.is_empty());
+        if let Some(frame) = frame.filter(|f| *f != e.frame) {
+            return Some(Place::Unheld(format!(
+                "the robot reports where it is in frame {frame:?}, and the bounds its owner set are in {:?}, so they cannot be held: point the envelope's position at a topic in {:?}",
+                e.frame, e.frame
+            )));
         }
         let at = number(&s.message, &p.x, &p.topic).and_then(|x| Ok((x, number(&s.message, &p.y, &p.topic)?)));
         Some(match at {
@@ -213,15 +217,16 @@ impl Guard {
         })
     }
 
-    /// Resolves with the first breach, read every [`WATCH_EVERY`]; never, when the envelope reads nothing. A run that
-    /// starts with the robot already outside the bounds (pushed there by hand, say) goes on, since its goal is inside
-    /// them and is how the robot gets back: the position is held once the robot reports itself inside.
-    async fn watch(&self) -> String {
+    /// Resolves with the first breach, read every [`WATCH_EVERY`]; never, when the envelope reads nothing. A run of a
+    /// `targeted` skill that starts with the robot already outside the bounds (pushed there by hand, say) goes on,
+    /// since its goal was held inside them and is how the robot gets back: the position is held once the robot reports
+    /// itself inside. A skill without a target has no such goal, so it is held from the start.
+    async fn watch(&self, targeted: bool) -> String {
         let reads = self.envelope.as_ref().is_some_and(|e| !e.readings().is_empty());
         if !reads {
             return std::future::pending().await;
         }
-        let mut armed = !matches!(self.position(), Some(Place::Outside(_)));
+        let mut armed = !targeted || !matches!(self.position(), Some(Place::Outside(_)));
         loop {
             tokio::time::sleep(WATCH_EVERY).await;
             match self.position() {
@@ -252,10 +257,11 @@ impl Guard {
                 r.message
             )));
         }
+        let targeted = self.spec(skill).is_some_and(|s| s.target.is_some());
         let mut running = std::pin::pin!(self.inner.run(run, skill, goal, progress));
         let breach = tokio::select! {
             end = &mut running => return end,
-            why = self.watch() => Some(why),
+            why = self.watch(targeted) => Some(why),
             () = me.stop.notified() => None,
         };
         let reason = me.stop_for(&breach.unwrap_or_default());
@@ -290,7 +296,7 @@ enum Place {
 /// The number at `at` in a message on `topic`, or why the bounds cannot be held without it.
 fn number(m: &Value, at: &str, topic: &str) -> Result<f64, String> {
     m.pointer(at).and_then(Value::as_f64).ok_or_else(|| {
-        format!("the robot reported no number at {at} on {topic}, so the bounds its owner set cannot be held")
+        format!("the robot reported no number at {at} on {topic}, so the bounds its owner set cannot be held: if it never fills that field, point the envelope at one it does")
     })
 }
 
@@ -567,6 +573,57 @@ y = \"/y\"
         topics.publish("pose", json!({ "x": 1.0, "y": 0.0 }));
         tokio::time::sleep(WATCH_EVERY * 2).await;
         topics.publish("pose", json!({ "x": 3.0, "y": 0.0 }));
+        let end = running.await.unwrap().unwrap();
+        assert!(
+            matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("OUTSIDE_GEOFENCE")),
+            "{end:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_skill_without_a_target_that_starts_outside_is_stopped_at_once() {
+        let envelope = format!("{ENVELOPE}[position]\ntopic = \"pose\"\nx = \"/x\"\ny = \"/y\"\n");
+        let spin = SkillSpec {
+            name: "spin".into(),
+            target: None,
+            ..go()
+        };
+        let topics = FakeTopics::new(vec![numbers("pose", &["x", "y"])]).with("pose", json!({ "x": 0.1, "y": 0.0 }));
+        let (g, _, _, _dir) = guard(
+            FakeSkills::new(vec![spin]).held("spin", vec![]),
+            &envelope,
+            Some(topics),
+        );
+        let end = g.run("r1", "spin", json!({}), Box::new(|_| {})).await.unwrap();
+        assert!(
+            matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("IN_FORBIDDEN_ZONE")),
+            "{end:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_position_whose_frame_is_left_empty_is_taken_in_the_envelopes() {
+        let envelope = format!("{ENVELOPE}[position]\ntopic = \"pose\"\nx = \"/x\"\ny = \"/y\"\n");
+        let topics = Arc::new(
+            FakeTopics::new(vec![numbers("pose", &["x", "y"])])
+                .with("pose", json!({ "header": { "frame_id": "" }, "x": 1.0, "y": 1.0 })),
+        );
+        let (g, skills, _) = guard_over(
+            FakeSkills::new(vec![go()]).held("go", vec![]),
+            &envelope,
+            topics.clone(),
+        );
+        let g = Arc::new(g);
+        let running = {
+            let g = g.clone();
+            tokio::spawn(async move { g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await })
+        };
+        while skills.goals().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(WATCH_EVERY * 3).await;
+        assert!(!running.is_finished(), "an empty frame is not another frame");
+        topics.publish("pose", json!({ "header": { "frame_id": "" }, "x": 3.0, "y": 0.0 }));
         let end = running.await.unwrap().unwrap();
         assert!(
             matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("OUTSIDE_GEOFENCE")),

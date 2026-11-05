@@ -65,7 +65,7 @@ sign_in() {  # base [approve flags...]: an agent signs in by the device flow, th
 
 lane_anonymous() (
   set -euo pipefail
-  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$data"' EXIT
+  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$data"' EXIT
   BEST_ROBOT_ROBOT=fake BEST_ROBOT_DATA="$data" BEST_ROBOT_LISTEN=127.0.0.1:7881 "$bin" &
   wait_up $! http://127.0.0.1:7881/.well-known/best
   validate http://127.0.0.1:7881
@@ -74,7 +74,7 @@ lane_anonymous() (
 # As an admitted agent, the validator probing every active capability with the key. Nothing prints the key.
 lane_signed_in() (
   set -euo pipefail
-  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$data"' EXIT
+  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$data"' EXIT
   base=http://127.0.0.1:7882
   export BEST_ROBOT_ROBOT=fake BEST_ROBOT_DATA="$data" BEST_ROBOT_LISTEN=127.0.0.1:7882
   "$bin" &
@@ -134,7 +134,7 @@ door_over() {  # port config [envelope]: starts the door over the rosbridge robo
 lane_rosbridge() (
   set -euo pipefail
   container=best-robot-gate-rosbridge
-  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
+  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null || true; docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
   testbed_up rosbridge "$container" 9091 'testbed ready' 60
   BEST_ROBOT_TEST_ROSBRIDGE=ws://127.0.0.1:9091 BEST_ROBOT_TEST_CONTAINER="$container" \
     cargo test -p rosbridge -- --ignored
@@ -155,8 +155,8 @@ lane_nav2() (
   set -euo pipefail
   container=best-robot-gate-nav2
   # On a failure, Nav2's own complaints, since the container goes with the lane.
-  data="$(mktemp -d)"; trap 'rc=$?; kill $(jobs -p) 2>/dev/null
-    [ "$rc" -ne 0 ] && docker logs "$container" 2>&1 | grep -iE "error|abort|fail|warn" | tail -40
+  data="$(mktemp -d)"; trap 'rc=$?; kill $(jobs -p) 2>/dev/null || true
+    if [ "$rc" -ne 0 ]; then docker logs "$container" 2>&1 | grep -iE "error|abort|fail|warn" | tail -40 || true; fi
     docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
   testbed_up nav2 "$container" 9093 'lifecycle_manager_navigation\]: .{0,20}Managed nodes are active' 300
   sed 's/:9092"/:9093"/' testbed/nav2/best-robot.toml > "$data/nav2.toml"
