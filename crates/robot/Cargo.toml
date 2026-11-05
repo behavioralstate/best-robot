@@ -1,0 +1,14 @@
+[package]
+name = "robot"
+description = "The robot as the door sees it: an abstraction this workspace owns, with a fake behind it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
