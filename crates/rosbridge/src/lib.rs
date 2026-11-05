@@ -108,7 +108,12 @@ impl Skills for Rosbridge {
         };
         let send = json!({ "op": "send_action_goal", "id": run, "action": action, "action_type": action_type,
             "args": schema::integers(goal, &spec.goal), "feedback": true });
-        let mut answers = self.client.open(run, send)?;
+        let Ok(mut answers) = self.client.open(run, send) else {
+            // Nothing was written: the robot never saw the goal, so sending it again is safe.
+            return Ok(Outcome::Refused(
+                "the door has no connection to the robot right now, so the goal was not sent: send it again in a moment, under a new command id".into(),
+            ));
+        };
         self.runs.lock().unwrap().insert(run.into(), action.clone());
         let end = loop {
             let Some(answer) = answers.recv().await else {

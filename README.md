@@ -64,15 +64,16 @@ rosbridge that doesn't answer within fifteen seconds, stops it with the reason. 
 
 - **Each skill as a command** whose data is the action's goal. A goal with a field the type lacks is refused with a
   400 naming it, before anything reaches the robot. The run is told as events under the command's correlation id:
-  `<Skill>Progressed` with each feedback, then one of `<Skill>Succeeded`, `<Skill>Aborted` or `<Skill>Canceled`
-  (with the result), or `<Skill>Refused` (with why the robot never started it: rejected, no action server).
+  `<Skill>Progressed` with its feedback, at most one a second (the latest, and the last before the end), then one of
+  `<Skill>Succeeded`, `<Skill>Aborted` or `<Skill>Canceled` (with the result), or `<Skill>Refused` (with why the robot
+  never started it: rejected, no action server, or no connection to the robot when it was sent).
 - **`cancel-skill`**, naming the id of the command that started a run. Only that run's sender can cancel it. It ends
-  in `SkillCancelRequested`, and the run's own event says how it ended; with no such run in flight, it ends in
-  `SkillCancelRefused`.
+  in `SkillCancelRequested`, and the run's own event says how it ended; with no such run in flight on the door, it ends
+  in `SkillCancelRefused`. A run the door lost track of (it ended in `CommandFailed`) can only be stopped at the robot.
 - **Each topic as a query**, `get-<name>`: the latest message and when it arrived, both null until one has.
 
-Each integer field is held to its ROS width, so a goal number the type cannot carry is refused with a 400 rather than
-wrapped. A float the robot sends may be null: that is how rosbridge writes NaN and infinity.
+Each integer field is held to its ROS width, and a float32 to its range, so a goal number the type cannot carry is
+refused with a 400 rather than wrapped. A float the robot sends may be null: that is how rosbridge writes NaN and infinity.
 
 A lost rosbridge is reconnected a second later; one that stops answering without closing its socket (a robot whose
 power or cable was pulled) is given up after six silent seconds. A run it cut short ends in `CommandFailed`, since the robot may still

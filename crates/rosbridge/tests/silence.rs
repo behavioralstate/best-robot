@@ -46,12 +46,17 @@ async fn a_run_on_a_silent_rosbridge_ends_unreachable_and_the_bridge_reconnects_
 
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        if let Ok(outcome) = rb
+        // Until it reconnects, a goal is refused unsent.
+        match rb
             .run("after", "fibonacci", json!({ "order": 2 }), Box::new(|_| {}))
             .await
+            .unwrap()
         {
-            assert_eq!(outcome, Outcome::Succeeded(json!({ "sequence": [0, 1, 1] })));
-            return;
+            Outcome::Refused(why) => assert!(why.contains("not sent"), "{why}"),
+            outcome => {
+                assert_eq!(outcome, Outcome::Succeeded(json!({ "sequence": [0, 1, 1] })));
+                return;
+            }
         }
     }
     panic!("the bridge did not reconnect within ten seconds of rosbridge answering again");

@@ -45,8 +45,12 @@ pub fn integers(value: Value, schema: &Value) -> Value {
         Value::Array(a) => Value::Array(a.into_iter().map(|v| integers(v, &schema["items"])).collect()),
         Value::Number(n) if schema["type"] == "integer" && n.is_f64() => {
             let f = n.as_f64().unwrap_or(f64::NAN);
-            if f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64 {
+            if f.fract() != 0.0 {
+                Value::Number(n)
+            } else if f >= i64::MIN as f64 && f < i64::MAX as f64 {
                 json!(f as i64)
+            } else if f >= 0.0 && f < u64::MAX as f64 {
+                json!(f as u64)
             } else {
                 Value::Number(n)
             }
@@ -81,6 +85,9 @@ fn field(ty: &str, len: i64, all: &[Typedef], way: Way, depth: usize) -> Result<
     let one = match ty {
         "bool" | "boolean" => json!({ "type": "boolean" }),
         "float" | "double" | "float32" | "float64" => match way {
+            Way::In if matches!(ty, "float" | "float32") => {
+                json!({ "type": "number", "minimum": -f32::MAX, "maximum": f32::MAX })
+            }
             Way::In => json!({ "type": "number" }),
             Way::Out => {
                 json!({ "type": ["number", "null"], "description": "null where the robot reported NaN or infinity" })
@@ -177,6 +184,23 @@ mod tests {
         let s = of(&t, Way::In).unwrap();
         let goal = integers(json!({ "order": 4.0, "speed": 2.0, "steps": [{ "n": 3.0 }] }), &s);
         assert_eq!(goal.to_string(), r#"{"order":4,"speed":2.0,"steps":[{"n":3}]}"#);
+        // Above i64, a uint64 still goes as an integer.
+        let big = integers(
+            json!({ "order": 1e19 }),
+            &json!({ "properties": { "order": { "type": "integer" } } }),
+        );
+        assert_eq!(big.to_string(), r#"{"order":10000000000000000000}"#);
+    }
+
+    #[test]
+    fn a_float32_goal_field_is_held_to_what_a_float32_carries() {
+        let t = typedefs(
+            json!([{ "type": "pkg/Root", "fieldnames": ["x", "y"], "fieldtypes": ["float32", "float64"],
+            "fieldarraylen": [-1, -1] }]),
+        );
+        let p = &of(&t, Way::In).unwrap()["properties"];
+        assert_eq!(p["x"]["maximum"], json!(f32::MAX));
+        assert!(p["y"].get("maximum").is_none());
     }
 
     #[test]
@@ -195,7 +219,10 @@ mod tests {
             p["header"]["properties"]["stamp"]["properties"]["nanosec"]["minimum"],
             0
         );
-        assert_eq!(p["cells"], json!({ "type": "array", "items": { "type": "number" } }));
+        assert_eq!(
+            (p["cells"]["type"].clone(), p["cells"]["items"]["type"].clone()),
+            (json!("array"), json!("number"))
+        );
         assert_eq!(p["corners"]["minItems"], 4);
         assert_eq!(p["data"]["contentEncoding"], "base64");
         assert_eq!(p["ok"]["type"], "boolean");

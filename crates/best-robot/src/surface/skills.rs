@@ -1,8 +1,9 @@
-//! Each skill as a command whose data is its goal, and its run as events: `<Skill>Progressed` with each feedback,
-//! then one of `<Skill>Succeeded`, `<Skill>Aborted`, `<Skill>Canceled` (with the result) or `<Skill>Refused` (with
+//! Each skill as a command whose data is its goal, and its run as events: `<Skill>Progressed` with its feedback, at
+//! most one a second, then one of `<Skill>Succeeded`, `<Skill>Aborted`, `<Skill>Canceled` (with the result) or `<Skill>Refused` (with
 //! why the robot never started it). `cancel-skill` ends a run its own sender started.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use best_peer_door::{Catalogue, CommandDef, Emitter, Envelope, EventDef};
 use robot::{Outcome, SkillSpec, Skills};
@@ -14,6 +15,9 @@ pub const CANCEL: &str = "cancel-skill";
 /// The types `cancel-skill` and its events answer to.
 pub const CANCEL_TYPES: [&str; 3] = ["CancelSkill", "SkillCancelRequested", "SkillCancelRefused"];
 const VERSION: &str = "1.0";
+/// The shortest time between two `<Skill>Progressed` of a run: a robot may send feedback every control tick, and an
+/// event is a fact kept for good, not a sample.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 /// The suffixes of a skill's events, in the order a run can produce them.
 const SUFFIXES: [&str; 5] = ["Progressed", "Succeeded", "Aborted", "Canceled", "Refused"];
 
@@ -42,7 +46,7 @@ pub fn add(mut c: Catalogue, skills: Arc<dyn Skills>) -> Catalogue {
     .event(event(
         "skill-cancel-refused",
         "SkillCancelRefused",
-        "No run of yours started by that command is in flight: it ended already, or never started.",
+        "No run of yours started by that command is in flight on this door: it ended, never started, or the door lost track of it.",
         json!({ "command": { "type": "string" }, "reason": { "type": "string" } }),
     ))
 }
@@ -52,7 +56,7 @@ fn outcomes(spec: &SkillSpec) -> [(&'static str, &'static str, Value); 5] {
     [
         (
             "Progressed",
-            "Feedback while the skill runs.",
+            "Feedback while the skill runs, at most one a second: the latest the robot sent, and the last one before the run ends.",
             json!({ "feedback": spec.feedback }),
         ),
         (
@@ -121,13 +125,14 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
             let (skills, name, ty) = (skills.clone(), name.clone(), ty.clone());
             Box::pin(async move {
                 let run = emitter.command_key().to_string();
+                let paced = Arc::new(Paced::new(emitter.clone(), format!("{ty}Progressed")));
                 let progressed = {
-                    let (emitter, ty) = (emitter.clone(), ty.clone());
-                    Box::new(move |feedback: Value| {
-                        emitter.emit(&format!("{ty}Progressed"), json!({ "feedback": feedback }));
-                    })
+                    let paced = paced.clone();
+                    Box::new(move |feedback: Value| paced.feedback(feedback))
                 };
-                match skills.run(&run, &name, envelope.data, progressed).await {
+                let end = skills.run(&run, &name, envelope.data, progressed).await;
+                paced.flush();
+                match end {
                     Ok(Outcome::Succeeded(r)) => emitter.emit(&format!("{ty}Succeeded"), json!({ "result": r })),
                     Ok(Outcome::Aborted(r)) => emitter.emit(&format!("{ty}Aborted"), json!({ "result": r })),
                     Ok(Outcome::Canceled(r)) => emitter.emit(&format!("{ty}Canceled"), json!({ "result": r })),
@@ -139,6 +144,42 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
                 };
             })
         }),
+    }
+}
+
+/// A run's feedback as events, at most one each [`PROGRESS_EVERY`]: one that comes sooner waits, replaced by any newer,
+/// and the one still waiting when the run ends is told before its outcome.
+struct Paced {
+    emitter: Emitter,
+    event_type: String,
+    state: Mutex<(Option<Instant>, Option<Value>)>,
+}
+
+impl Paced {
+    fn new(emitter: Emitter, event_type: String) -> Self {
+        Self {
+            emitter,
+            event_type,
+            state: Mutex::new((None, None)),
+        }
+    }
+
+    fn feedback(&self, feedback: Value) {
+        let mut state = self.state.lock().unwrap();
+        let (told, waiting) = &mut *state;
+        if told.is_some_and(|t| t.elapsed() < PROGRESS_EVERY) {
+            *waiting = Some(feedback);
+        } else {
+            *told = Some(Instant::now());
+            *waiting = None;
+            self.emitter.emit(&self.event_type, json!({ "feedback": feedback }));
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(feedback) = self.state.lock().unwrap().1.take() {
+            self.emitter.emit(&self.event_type, json!({ "feedback": feedback }));
+        }
     }
 }
 
@@ -164,7 +205,7 @@ fn cancel(skills: Arc<dyn Skills>) -> CommandDef {
                     Ok(true) => emitter.emit("SkillCancelRequested", json!({ "command": command })),
                     Ok(false) => emitter.emit(
                         "SkillCancelRefused",
-                        json!({ "command": command, "reason": "no run of yours started by that command is in flight: it ended already, or never started; read the events of that command" }),
+                        json!({ "command": command, "reason": "no run of yours started by that command is in flight on this door: it ended, never started, or the door lost track of it. Read that command's events: if they end in CommandFailed, the robot may still be running the goal, and only the robot itself can stop it now" }),
                     ),
                     Err(e) => emitter.emit(
                         "CommandFailed",
@@ -223,6 +264,18 @@ mod tests {
         assert_eq!(events[0]["data"], json!({ "feedback": { "at": 1 } }));
         assert_eq!(events[1]["data"], json!({ "result": { "counted": 2 } }));
         assert_eq!(skills.goals(), [("count".to_string(), json!({ "to": 2 }))]);
+    }
+
+    #[tokio::test]
+    async fn feedback_faster_than_a_second_is_told_as_its_first_and_its_last() {
+        let feedback = (1..=50).map(|at| json!({ "at": at })).collect();
+        let fake = FakeSkills::new(vec![spec("count")]).ends("count", feedback, Outcome::Succeeded(json!({})));
+        let (door, _) = door(fake).await;
+        door.send("count", "Count", "c1", json!({})).await;
+        let events = door.events_until("c1", &["CountSucceeded"]).await;
+        assert_eq!(types(&events), ["CountProgressed", "CountProgressed", "CountSucceeded"]);
+        assert_eq!(events[0]["data"]["feedback"]["at"], 1);
+        assert_eq!(events[1]["data"]["feedback"]["at"], 50);
     }
 
     #[tokio::test]
@@ -317,9 +370,6 @@ mod tests {
         door.send(CANCEL, "CancelSkill", "x", json!({ "command": "never-sent" }))
             .await;
         let events = door.events_until("x", &["SkillCancelRefused"]).await;
-        assert!(events[0]["data"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("no run of yours"));
+        assert!(events[0]["data"]["reason"].as_str().unwrap().contains("lost track"));
     }
 }
