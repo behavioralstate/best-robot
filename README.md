@@ -12,7 +12,7 @@ with, and is built on best-peer's door crate. The plan is the epic
 [SDLC.md](SDLC.md).
 
 **Where it stands:** the door serves a fake robot's state, or a ROS 2 robot's actions and topics through rosbridge,
-proven against a ROS 2 Jazzy testbed. It serves http on loopback only, and has no safety envelope yet (#264): put
+proven against a ROS 2 Jazzy testbed, and drives a simulated TurtleBot3 under Nav2. It serves http on loopback only, and has no safety envelope yet (#264): put
 nothing on the door that moves a real robot until that slice lands.
 
 ## Try it
@@ -33,6 +33,26 @@ Its next poll receives a key, and `get-robot-state` answers with the fake robot'
 `fault`), pose in a named frame and charge. When the robot does not answer, the query is refused with 503
 `ROBOT_UNREACHABLE`. When it reports a pose number or a charge that is not finite, or a charge outside 0 to 100,
 the query is refused with 502 `ROBOT_STATE_INVALID`, naming the field. It never serves a value its schema forbids.
+
+### A simulated robot
+
+With Docker running (Git Bash on Windows):
+
+```bash
+scripts/sim.sh
+```
+
+It starts Gazebo with a TurtleBot3 and Nav2, headless, in a container (the first run builds a 4 GB image), then the
+door in front of it on the same address as above; Ctrl-C stops both. An agent signed in as above finds:
+
+- `navigate-to`, whose data is Nav2's goal, a pose in the map frame. The robot starts at x -2, y -0.5;
+  `{ "pose": { "header": { "frame_id": "map" }, "pose": { "position": { "x": -0.55, "y": -0.55 }, "orientation": { "w": 1 } } } }`
+  drives it between the pillars. Its run is `NavigateToProgressed` (where it is, how far it has left) about once a
+  second, then `NavigateToSucceeded`; `NavigateToAborted` with Nav2's `error_code` when it cannot get there (204: the
+  goal is outside the map), or `NavigateToCanceled` after a `cancel-skill` naming the command.
+- `get-pose`: where the robot believes it is, from its localisation.
+
+The door's config for it is [`testbed/nav2/best-robot.toml`](testbed/nav2/best-robot.toml), the same shape as below.
 
 ### In front of a ROS 2 robot
 
@@ -98,6 +118,7 @@ again: a goal sent twice moves a robot twice.
 
 ## Gate
 
-`scripts/gate.sh all` (Git Bash on Windows) ends in `GATE GREEN` or `GATE RED`. CI runs the same script. Its
-rosbridge lane needs Docker: it builds `testbed/rosbridge` (ROS 2 Jazzy, rosbridge, a test action and a test topic)
-and drives the door over it.
+`scripts/gate.sh all` (Git Bash on Windows) ends in `GATE GREEN` or `GATE RED`. CI runs the same script. Its last two
+lanes need Docker: the rosbridge lane builds `testbed/rosbridge` (ROS 2 Jazzy, rosbridge, a test action and a test
+topic) and drives the door over it; the nav2 lane builds `testbed/nav2` (the simulated robot above) and drives it
+through the door to a pose and back, out of the map, and cancelled on the way.

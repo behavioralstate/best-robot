@@ -2,22 +2,25 @@
 # The local proof of SDLC.md section 3: fmt, clippy with warnings as errors, the tests, a release build, then
 # best-validate against the built door on the fake robot, anonymous and signed in through the real device flow and
 # `best-robot approve`; then the rosbridge lane, the same door over a real ROS 2 stack in a container (testbed/rosbridge):
-# the adapter's testbed tests, best-validate signed in, and a goal sent through the door and read back as events. The
-# last line is GATE GREEN or GATE RED, and nothing else is a pass. CI runs this same script.
+# the adapter's testbed tests, best-validate signed in, and a goal sent through the door and read back as events; then
+# the nav2 lane, the door driving a simulated TurtleBot3 under Nav2 (testbed/nav2) to a pose and back, out of the map,
+# and cancelled on the way. The last line is GATE GREEN or GATE RED, and nothing else is a pass. CI runs this same
+# script.
 #
-#   scripts/gate.sh [fmt|clippy|test|build|validate|rosbridge|all]      default: all
+#   scripts/gate.sh [fmt|clippy|test|build|validate|rosbridge|nav2|all]      default: all
 #
-# Needs cargo, node (npx), curl and docker; on Windows, Git Bash. The doors listen on 127.0.0.1:7881 to 7883 and the
-# testbed's rosbridge on 9091, away from a door already serving on 7780, and leave nothing behind: each lane's data
-# folder is temporary, and its door and container are stopped.
+# Needs cargo, node (npx), curl and docker; on Windows, Git Bash. The doors listen on 127.0.0.1:7881 to 7884 and the
+# testbeds' rosbridges on 9091 and 9093, away from a door on 7780 and scripts/sim.sh's robot on 9092, and leave nothing
+# behind: each lane's data folder is temporary, and its door and container are stopped.
 set -uo pipefail
 BEST_VALIDATE_VERSION=0.4.3
 
 cd "$(dirname "$0")/.."
+source scripts/testbed.sh
 what="${1:-all}"
 case "$what" in
-  fmt|clippy|test|build|validate|rosbridge|all) ;;
-  *) echo "scripts/gate.sh: unknown step '$what'; one of fmt, clippy, test, build, validate, rosbridge, all"; echo "GATE RED"; exit 1 ;;
+  fmt|clippy|test|build|validate|rosbridge|nav2|all) ;;
+  *) echo "scripts/gate.sh: unknown step '$what'; one of fmt, clippy, test, build, validate, rosbridge, nav2, all"; echo "GATE RED"; exit 1 ;;
 esac
 bin="target/release/best-robot"
 failed=0
@@ -33,7 +36,7 @@ wants() { [[ "$what" == all || "$what" == "$1" ]]; }
 if wants fmt; then step "fmt" cargo fmt --all --check; fi
 if wants clippy; then step "clippy" cargo clippy --workspace --all-targets -- -D warnings; fi
 if wants test; then step "test" cargo test --workspace; fi
-if wants build || wants validate || wants rosbridge; then step "release build" cargo build --release -p best-robot; fi
+if wants build || wants validate || wants rosbridge || wants nav2; then step "release build" cargo build --release -p best-robot; fi
 
 validate() { npx -y "@behavioralstate/best-validate@$BEST_VALIDATE_VERSION" "$@"; }
 wait_up() {  # pid url: the door this lane started answers its manifest within thirty seconds, or the lane fails. The
@@ -76,6 +79,35 @@ lane_signed_in() (
   validate "$base" --api-key "$key" --auth-type apikey --auth-header X-Api-Key --probe-registration
 )
 
+send() {  # base key schema type id data: sends a command through the door as the signed-in agent.
+  curl -sf -o /dev/null -X POST "$1/commands" -H "X-Api-Key: $2" -H "Content-Type: application/json" -d '{
+    "specversion": "1.0", "id": "'"$5"'", "source": "gate", "type": "'"$4"'", "datacontenttype": "application/json",
+    "dataschema": "'"$1"'/commands/'"$3"'/1.0", "time": "2026-11-05T00:00:00Z", "data": '"$6"' }'
+}
+events_until() {  # base key correlation pattern seconds: the events under the correlation once one matches the pattern.
+  local events=""
+  for _ in $(seq 1 $(($5 * 4))); do
+    events=$(curl -sf "$1/events?correlationId=$3" -H "X-Api-Key: $2")
+    [[ "$events" =~ $4 ]] && break
+    sleep 0.25
+  done
+  echo "$events"
+}
+expect() {  # label js: reads events from stdin, prints their types, and fails unless the js expression over `e` (the
+  # events), `types` and `last` holds.
+  node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const e=JSON.parse(s).events, types=e.map(x=>x.type), last=e[e.length-1];
+    console.log(process.argv[1]+":", types.join(" "));
+    if(!eval(process.argv[2])) { console.log(JSON.stringify(last)); process.exit(1); }
+  })' "$1" "$2"
+}
+door_over() {  # port config: starts the door over the rosbridge robot <config> names, on 127.0.0.1:<port>, as a job
+  # of the calling lane (so its trap stops it), with the lane's data folder, and waits until it answers.
+  export BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG="$2" BEST_ROBOT_DATA="$data" BEST_ROBOT_LISTEN="127.0.0.1:$1"
+  "$bin" &
+  wait_up $! "http://127.0.0.1:$1/.well-known/best"
+}
+
 # The door over a real ROS 2 stack: the testbed container (rosbridge, a Fibonacci action, a battery topic), the
 # adapter's tests against it, then the door serving it, validated signed in, and a goal sent through the door whose
 # feedback and result come back as events under its correlation id.
@@ -83,39 +115,48 @@ lane_rosbridge() (
   set -euo pipefail
   container=best-robot-gate-rosbridge
   data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
-  docker build -q -t best-robot-rosbridge testbed/rosbridge >/dev/null
-  docker rm -f "$container" >/dev/null 2>&1 || true
-  docker run -d --name "$container" -p 127.0.0.1:9091:9090 best-robot-rosbridge >/dev/null
-  for _ in $(seq 1 120); do
-    logs=$(docker logs "$container" 2>&1)
-    [[ "$logs" == *"WebSocket server started"* && "$logs" == *"testbed ready"* ]] && break
-    sleep 0.5
-  done
-  [[ "$logs" == *"testbed ready"* ]] || { echo "the testbed did not come up:"; echo "$logs" | tail -20; exit 1; }
+  testbed_up rosbridge "$container" 9091 'testbed ready' 60
   BEST_ROBOT_TEST_ROSBRIDGE=ws://127.0.0.1:9091 BEST_ROBOT_TEST_CONTAINER="$container" \
     cargo test -p rosbridge -- --ignored
   base=http://127.0.0.1:7883
-  export BEST_ROBOT_ROBOT=rosbridge BEST_ROBOT_CONFIG=testbed/rosbridge/best-robot.toml
-  export BEST_ROBOT_DATA="$data" BEST_ROBOT_LISTEN=127.0.0.1:7883
-  "$bin" &
-  wait_up $! "$base/.well-known/best"
+  door_over 7883 testbed/rosbridge/best-robot.toml
   key=$(sign_in "$base")
   validate "$base" --api-key "$key" --auth-type apikey --auth-header X-Api-Key
-  curl -sf -o /dev/null -X POST "$base/commands" -H "X-Api-Key: $key" -H "Content-Type: application/json" -d '{
-    "specversion": "1.0", "id": "gate-fibonacci", "source": "gate", "type": "Fibonacci",
-    "datacontenttype": "application/json", "dataschema": "'"$base"'/commands/fibonacci/1.0",
-    "time": "2026-11-05T00:00:00Z", "data": { "order": 5 } }'
-  for _ in $(seq 1 40); do
-    events=$(curl -sf "$base/events?correlationId=gate-fibonacci" -H "X-Api-Key: $key")
-    [[ "$events" == *FibonacciSucceeded* ]] && break
-    sleep 0.25
-  done
-  echo "$events" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-    const e=JSON.parse(s).events, types=e.map(x=>x.type), last=e[e.length-1];
-    console.log("events of the goal:", types.join(" "));
-    if(!types.includes("FibonacciProgressed")) throw new Error("no feedback came back as an event");
-    if(last.type!=="FibonacciSucceeded" || JSON.stringify(last.data.result.sequence)!=="[0,1,1,2,3,5]") throw new Error("the goal did not end with its result");
-  })'
+  send "$base" "$key" fibonacci Fibonacci gate-fibonacci '{ "order": 5 }'
+  events_until "$base" "$key" gate-fibonacci FibonacciSucceeded 10 | expect "events of the goal" \
+    'types.includes("FibonacciProgressed") && last.type==="FibonacciSucceeded" && JSON.stringify(last.data.result.sequence)==="[0,1,1,2,3,5]"'
+)
+
+# The door over the simulated robot (testbed/nav2: Gazebo, a TurtleBot3, Nav2): validated signed in, then driven
+# through the door to a pose and back, sent somewhere it cannot reach, and cancelled on the way, each told as events.
+lane_nav2() (
+  set -euo pipefail
+  container=best-robot-gate-nav2
+  data="$(mktemp -d)"; trap 'kill $(jobs -p) 2>/dev/null; docker rm -f "$container" >/dev/null 2>&1; rm -rf "$data"' EXIT
+  testbed_up nav2 "$container" 9093 'lifecycle_manager_navigation\]: .{0,20}Managed nodes are active' 300
+  sed 's/:9092"/:9093"/' testbed/nav2/best-robot.toml > "$data/nav2.toml"
+  base=http://127.0.0.1:7884
+  door_over 7884 "$data/nav2.toml"
+  key=$(sign_in "$base")
+  validate "$base" --api-key "$key" --auth-type apikey --auth-header X-Api-Key
+  goal() { echo '{ "pose": { "header": { "frame_id": "map" }, "pose": { "position": { "x": '"$1"', "y": '"$2"' }, "orientation": { "w": 1 } } } }'; }
+  ended='NavigateTo(Succeeded|Aborted|Canceled|Refused)|CommandFailed'
+  send "$base" "$key" navigate-to NavigateTo gate-there "$(goal -0.55 -0.55)"
+  events_until "$base" "$key" gate-there "$ended" 120 | expect "to a pose" \
+    'types.includes("NavigateToProgressed") && last.type==="NavigateToSucceeded"'
+  curl -sf "$base/queries/get-pose" -H "X-Api-Key: $key" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const p=JSON.parse(s).message.pose.pose.position; console.log("get-pose:", p.x.toFixed(2), p.y.toFixed(2));
+    if(Math.hypot(p.x+0.55,p.y+0.55)>0.5) process.exit(1); })'
+  send "$base" "$key" navigate-to NavigateTo gate-back "$(goal -2.0 -0.5)"
+  events_until "$base" "$key" gate-back "$ended" 120 | expect "and back" 'last.type==="NavigateToSucceeded"'
+  send "$base" "$key" navigate-to NavigateTo gate-far "$(goal 10 10)"
+  events_until "$base" "$key" gate-far "$ended" 60 | expect "out of the map" \
+    'last.type==="NavigateToAborted" && last.data.result.error_code===204'
+  send "$base" "$key" navigate-to NavigateTo gate-cancelled "$(goal 1.6 1.6)"
+  events_until "$base" "$key" gate-cancelled NavigateToProgressed 30 >/dev/null
+  send "$base" "$key" cancel-skill CancelSkill gate-cancel '{ "command": "gate-cancelled" }'
+  events_until "$base" "$key" gate-cancel 'SkillCancel(Requested|Refused)' 10 | expect "the cancel" 'last.type==="SkillCancelRequested"'
+  events_until "$base" "$key" gate-cancelled "$ended" 60 | expect "cancelled on the way" 'last.type==="NavigateToCanceled"'
 )
 
 if wants validate; then
@@ -123,5 +164,6 @@ if wants validate; then
   step "validate, signed in through the device flow and best-robot approve" lane_signed_in
 fi
 if wants rosbridge; then step "rosbridge: the door over a ROS 2 testbed" lane_rosbridge; fi
+if wants nav2; then step "nav2: the door drives a simulated robot" lane_nav2; fi
 
 if [ "$failed" -ne 0 ]; then echo "GATE RED"; exit 1; else echo "GATE GREEN"; fi

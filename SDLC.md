@@ -27,7 +27,8 @@
 - **Depend on abstractions this workspace owns.** The door knows the robot's ports (`Robot`, `Skills`, `Topics` in
   `crates/robot`), never ROS or an adapter; `main.rs` is the one place an adapter is chosen. The door's tests use the
   fakes. An adapter is thin and proven against the ROS 2 testbed (`testbed/rosbridge`, in the gate's rosbridge lane),
-  and on a real robot by hand, with the proof on the slice's issue. No robot is ever needed by CI.
+  and against the simulated robot (`testbed/nav2`: Gazebo, a TurtleBot3, Nav2, in the gate's nav2 lane), and on a real
+  robot by hand, with the proof on the slice's issue. No real robot is ever needed by CI.
 - **Never send a goal twice.** A command the door stopped during ends in `CommandFailed` at the next start and is
   never run again; a run whose rosbridge was lost ends the same way, since the robot may still be running it.
 - **Small and cohesive.** A module owns one thing (the settings, the approver, each part of the surface, the door,
@@ -42,7 +43,9 @@
   --workspace --all-targets -- -D warnings`, `cargo test --workspace`, a release build, then `best-validate` on the
   served door, anonymous and signed in through the device flow and the real `best-robot approve`, then the rosbridge
   lane: the ROS 2 testbed in a container, the adapter's testbed tests, the door over it validated signed in, and a goal
-  sent through the door and read back as events. It ends in `GATE GREEN` or `GATE RED`; CI runs the same script.
+  sent through the door and read back as events; then the nav2 lane: the simulated robot driven through the door to a
+  pose and back, out of the map and cancelled on the way, each read back as events. It ends in `GATE GREEN` or
+  `GATE RED`; CI runs the same script.
 
 ## 4. Ship
 

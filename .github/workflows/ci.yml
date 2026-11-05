@@ -18,6 +18,7 @@ jobs:
         with:
           node-version: 22
 
-      # The gate every maintainer runs before the push (SDLC.md section 3): the fake robot, then the ROS 2 testbed in
-      # a container (the runner's Docker). A surface the spec refuses fails the build. CI never needs a robot.
+      # The gate every maintainer runs before the push (SDLC.md section 3): the fake robot, then the ROS 2 testbed and
+      # the simulated robot (Gazebo and Nav2), each in a container on the runner's Docker. A surface the spec refuses
+      # fails the build. CI never needs a real robot.
       - run: scripts/gate.sh all
