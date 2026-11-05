@@ -33,6 +33,11 @@ impl Settings {
                 "BEST_ROBOT_LISTEN={listen} is off loopback, and this door serves http alone: off loopback the credential would travel in the clear. Listen on 127.0.0.1, behind a proxy on this machine that serves https if others must reach it"
             ));
         }
+        if listen.port() == 0 {
+            return Err(format!(
+                "BEST_ROBOT_LISTEN={listen} names no port: agents and best-robot approve reach the door at the port it listens on, so give one, such as {DEFAULT_LISTEN}"
+            ));
+        }
         let endpoint = var("BEST_ROBOT_ENDPOINT").unwrap_or_else(|| format!("http://{listen}"));
         if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
             return Err(format!(
@@ -88,6 +93,12 @@ mod tests {
     fn an_address_off_loopback_is_refused_with_the_reason() {
         let e = read(&[("BEST_ROBOT_LISTEN", "0.0.0.0:7780")]).unwrap_err();
         assert!(e.contains("off loopback"), "{e}");
+    }
+
+    #[test]
+    fn port_0_is_refused_since_no_one_could_reach_the_door_at_it() {
+        let e = read(&[("BEST_ROBOT_LISTEN", "127.0.0.1:0")]).unwrap_err();
+        assert!(e.contains("BEST_ROBOT_LISTEN") && e.contains("no port"), "{e}");
     }
 
     #[test]
