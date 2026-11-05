@@ -23,7 +23,11 @@ fn robot_state(robot: Arc<dyn Robot>) -> QueryDef {
             let robot = robot.clone();
             Box::pin(async move {
                 let state = robot.state().await.map_err(|e| {
-                    BestError::new(StatusCode::SERVICE_UNAVAILABLE, "ROBOT_UNREACHABLE", e.to_string())
+                    BestError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "ROBOT_UNREACHABLE",
+                        format!("{e}: read it again in a moment, and if it stays so, tell the robot's owner that the door cannot reach the robot"),
+                    )
                 })?;
                 within_schema(&state).map_err(|why| {
                     BestError::new(
@@ -178,6 +182,12 @@ mod tests {
             "{}",
             e.message
         );
+        let e = ask(reporting(1.0, 0.0, Some(-5.0))).await.unwrap_err();
+        assert!(
+            e.message.contains("battery_percent = -5, outside 0 to 100"),
+            "{}",
+            e.message
+        );
         assert!(ask(reporting(1.0, 0.0, Some(100.0))).await.is_ok());
         assert!(ask(reporting(1.0, 0.0, Some(0.0))).await.is_ok());
     }
@@ -196,6 +206,7 @@ mod tests {
         let e = ask(Arc::new(Silent)).await.unwrap_err();
         assert_eq!(e.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(e.code, "ROBOT_UNREACHABLE");
-        assert!(e.message.contains("rosbridge closed the socket"));
+        assert!(e.message.contains("rosbridge closed the socket"), "{}", e.message);
+        assert!(e.message.contains("read it again"), "{}", e.message);
     }
 }

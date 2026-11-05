@@ -30,8 +30,8 @@ best-robot approve 8BB9-CB44
 
 Its next poll receives a key, and `get-robot-state` answers with the robot's name, status (`idle`, `moving`,
 `fault`), pose in a named frame and charge. When the robot does not answer, the query is refused with 503
-`ROBOT_UNREACHABLE`. When it reports a pose number that is not finite, or a charge outside 0 to 100, the query is
-refused with 502 `ROBOT_STATE_INVALID`, naming the field. It never serves a value its schema forbids.
+`ROBOT_UNREACHABLE`. When it reports a pose number or a charge that is not finite, or a charge outside 0 to 100,
+the query is refused with 502 `ROBOT_STATE_INVALID`, naming the field. It never serves a value its schema forbids.
 
 | Variable | Default | What it is |
 |---|---|---|
