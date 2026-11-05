@@ -29,7 +29,7 @@ fn robot_state(robot: Arc<dyn Robot>) -> QueryDef {
                     BestError::new(
                         StatusCode::BAD_GATEWAY,
                         "ROBOT_STATE_INVALID",
-                        format!("the robot reported {why}, so its state is not served"),
+                        format!("the robot reported {why}, so its state is not served: read it again in a moment, and if it stays so, tell the robot's owner that its localisation or its battery reading is at fault"),
                     )
                 })?;
                 Ok(state_json(&state))
@@ -41,11 +41,14 @@ fn robot_state(robot: Arc<dyn Robot>) -> QueryDef {
 /// What the schema promises and an `f64` does not: every number finite, the charge within 0 to 100. A robot that
 /// breaks it is refused, never served as `null` or as a value the schema forbids.
 fn within_schema(s: &State) -> Result<(), String> {
-    if let Some(p) = &s.pose {
-        for (field, v) in [("pose.x", p.x), ("pose.y", p.y), ("pose.yaw", p.yaw)] {
-            if !v.is_finite() {
-                return Err(format!("{field} = {v}, not a finite number"));
-            }
+    let pose = s
+        .pose
+        .iter()
+        .flat_map(|p| [("pose.x", p.x), ("pose.y", p.y), ("pose.yaw", p.yaw)]);
+    let battery = s.battery_percent.map(|b| ("battery_percent", b));
+    for (field, v) in pose.chain(battery) {
+        if !v.is_finite() {
+            return Err(format!("{field} = {v}, not a finite number"));
         }
     }
     match s.battery_percent {
@@ -136,34 +139,47 @@ mod tests {
         assert!(jsonschema::is_valid(&state_schema(), &answer), "{answer}");
     }
 
-    fn reporting(pose_x: f64, battery_percent: Option<f64>) -> Arc<dyn Robot> {
+    fn reporting(x: f64, yaw: f64, battery_percent: Option<f64>) -> Arc<dyn Robot> {
         Arc::new(Fake::new(State {
             name: "r1".into(),
             status: Status::Moving,
             pose: Some(robot::Pose {
                 frame: "map".into(),
-                x: pose_x,
+                x,
                 y: 0.0,
-                yaw: 0.0,
+                yaw,
             }),
             battery_percent,
         }))
     }
 
     #[tokio::test]
-    async fn a_number_that_is_not_finite_is_refused_by_name_never_served_as_null() {
-        let e = ask(reporting(f64::NAN, Some(50.0))).await.unwrap_err();
-        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(e.code, "ROBOT_STATE_INVALID");
-        assert!(e.message.contains("pose.x"), "{}", e.message);
+    async fn a_number_that_is_not_finite_is_refused_by_name_with_the_fix_never_served_as_null() {
+        for (robot, field) in [
+            (reporting(f64::NAN, 0.0, Some(50.0)), "pose.x"),
+            (reporting(0.0, f64::INFINITY, Some(50.0)), "pose.yaw"),
+            (reporting(0.0, 0.0, Some(f64::NAN)), "battery_percent"),
+        ] {
+            let e = ask(robot).await.unwrap_err();
+            assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+            assert_eq!(e.code, "ROBOT_STATE_INVALID");
+            assert!(e.message.contains(&format!("{field} = ")), "{}", e.message);
+            assert!(e.message.contains("not a finite number"), "{}", e.message);
+            assert!(e.message.contains("read it again"), "{}", e.message);
+        }
     }
 
     #[tokio::test]
     async fn a_charge_outside_0_to_100_is_refused_by_name() {
-        let e = ask(reporting(1.0, Some(150.0))).await.unwrap_err();
+        let e = ask(reporting(1.0, 0.0, Some(150.0))).await.unwrap_err();
         assert_eq!(e.code, "ROBOT_STATE_INVALID");
-        assert!(e.message.contains("battery_percent"), "{}", e.message);
-        assert!(ask(reporting(1.0, Some(100.0))).await.is_ok());
+        assert!(
+            e.message.contains("battery_percent = 150, outside 0 to 100"),
+            "{}",
+            e.message
+        );
+        assert!(ask(reporting(1.0, 0.0, Some(100.0))).await.is_ok());
+        assert!(ask(reporting(1.0, 0.0, Some(0.0))).await.is_ok());
     }
 
     struct Silent;

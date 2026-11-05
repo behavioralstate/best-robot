@@ -29,11 +29,13 @@ best-robot approve 8BB9-CB44
 ```
 
 Its next poll receives a key, and `get-robot-state` answers with the robot's name, status (`idle`, `moving`,
-`fault`), pose in a named frame and charge.
+`fault`), pose in a named frame and charge. When the robot does not answer, the query is refused with 503
+`ROBOT_UNREACHABLE`. When it reports a pose number that is not finite, or a charge outside 0 to 100, the query is
+refused with 502 `ROBOT_STATE_INVALID`, naming the field. It never serves a value its schema forbids.
 
 | Variable | Default | What it is |
 |---|---|---|
-| `BEST_ROBOT_LISTEN` | `127.0.0.1:7780` | Where the door listens. Loopback only: off it the key would travel in the clear, and the door refuses to start. |
+| `BEST_ROBOT_LISTEN` | `127.0.0.1:7780` | Where the door listens, with a port other than 0. Loopback only: off it the key would travel in the clear, and the door refuses to start. |
 | `BEST_ROBOT_ENDPOINT` | `http://<listen>` | The base URL agents reach it at. An https proxy on this machine sets it to its own address. |
 | `BEST_ROBOT_DATA` | `~/.best-robot` | The admin token, the credentials (hashes only) and the event log. |
 | `BEST_ROBOT_ROBOT` | `fake` | The robot behind the door. `fake` answers with a fixed state and moves nothing. |
