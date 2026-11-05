@@ -37,10 +37,15 @@ This file records the run: how it was set up, what it showed, and the transcript
     - `BEST_MCP_ALLOW_LOCAL=true` was set because the door was on loopback;
     - its credential file was in a scratch folder, deleted afterwards.
   - Every call in the transcript is either a `best-*` tool of the connector or the client's tool search.
-  - Earlier tries ran the client headless, and none of them reached the robot. Tries that resumed `claude -p` turn
-    by turn started a new connector each turn, which lost the sign-in waiting for the person's approval. The last
-    try, one headless process fed the person's answers, was stopped at the sign-in, and the run was made with the
-    person at their own terminal instead.
+  - Three earlier tries ran the client headless and were set aside:
+    - The first was a single `claude -p` turn, which ended at the sign-in code.
+    - The second resumed `claude -p` turn by turn. Each turn started a new connector, which lost the sign-in that
+      was waiting for the person's approval.
+    - The third was one headless process fed the person's answers. It signed in, read the robot's place and sent a
+      first navigation, which the door accepted. The owner then chose to make the run as a person at their own
+      terminal, so it was stopped while sampling the stream. Its door log was not kept.
+
+    This run started from a restarted simulator and a fresh data folder.
 - **Nothing written for the agent**: the person's sentence at the top of the transcript is all it got. It read:
   - the manifest;
   - both catalogues;
