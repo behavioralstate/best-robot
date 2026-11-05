@@ -48,17 +48,13 @@ async fn hold(State(o): State<Owner>, Form(f): Form<HoldForm>) -> Response {
     if !trusted(&o, &f.proof).await {
         return untrusted();
     }
-    let reason = f
-        .reason
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| "its owner gave no reason".into());
+    let reason = f.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
     let since = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
     // In force before anything else, even when it cannot be written down: a hold that fails open would let the robot
     // run on while its owner believes it stopped.
-    let (held, written) = o.hold.hold(&reason, &since);
+    let (held, written) = o.hold.hold(reason, &since);
     tracing::warn!(reason = %held.reason, now = f.now, "the robot is held by its owner");
     let warning = written.err().map(|e| {
         tracing::error!(error = %e, "the hold could not be written down");

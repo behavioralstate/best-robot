@@ -44,11 +44,16 @@ impl Hold {
     }
 
     /// Holds the robot for `reason`, in force here at once, even when it cannot be written down; the second part says
-    /// whether it was, so a restart keeps it. A hold already in force keeps its `since`, and takes the new reason.
-    pub fn hold(&self, reason: &str, since: &str) -> (Held, std::io::Result<()>) {
+    /// whether it was, so a restart keeps it. A hold already in force keeps its `since`, and its reason when this one
+    /// gives none.
+    pub fn hold(&self, reason: Option<&str>, since: &str) -> (Held, std::io::Result<()>) {
         let mut current = self.held.lock().unwrap();
         let held = Held {
-            reason: reason.into(),
+            reason: reason.map(str::to_string).unwrap_or_else(|| {
+                current
+                    .as_ref()
+                    .map_or_else(|| "its owner gave no reason".into(), |h| h.reason.clone())
+            }),
             since: current.as_ref().map_or_else(|| since.into(), |h| h.since.clone()),
         };
         *current = Some(held.clone());
@@ -83,9 +88,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hold = Hold::open(dir.path()).unwrap();
         assert_eq!(hold.current(), None);
-        hold.hold("servicing the arm", "2026-11-05T00:00:00Z").1.unwrap();
-        let (held, _) = hold.hold("still servicing it", "2026-11-05T01:00:00Z");
+        hold.hold(Some("servicing the arm"), "2026-11-05T00:00:00Z").1.unwrap();
+        let (held, _) = hold.hold(Some("still servicing it"), "2026-11-05T01:00:00Z");
         assert_eq!(held.since, "2026-11-05T00:00:00Z", "a hold in force keeps its since");
+        assert_eq!(
+            hold.hold(None, "2026-11-05T02:00:00Z").0.reason,
+            "still servicing it",
+            "and its reason, given none"
+        );
         let again = Hold::open(dir.path()).unwrap();
         assert_eq!(again.current().unwrap().reason, "still servicing it");
         assert!(again.release().unwrap());
@@ -99,7 +109,7 @@ mod tests {
         let hold = Hold::open(dir.path()).unwrap();
         // A folder where the file would go: the write fails, as on a read-only or full disk.
         std::fs::create_dir(dir.path().join("hold.json.tmp")).unwrap();
-        let (held, written) = hold.hold("servicing the arm", "2026-11-05T00:00:00Z");
+        let (held, written) = hold.hold(Some("servicing the arm"), "2026-11-05T00:00:00Z");
         assert!(written.is_err());
         assert_eq!(hold.current(), Some(held));
     }

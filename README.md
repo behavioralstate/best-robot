@@ -162,9 +162,16 @@ message: one that names no number stops the door, saying which. Then:
   just off an edge that would be admitted.
 - While any skill runs, targeted or not, the door reads the position and speed topics every 200 ms. A position
   outside the fence or in a zone, a speed above the ceiling, no speed reported for two seconds, or a reading without
-  its number (NaN) stops the run: the door cancels it, again every half second until the robot ends it, and it ends
-  in `<Skill>Stopped` with the reason. The position is the latest the robot reported, however old: a localiser such
-  as AMCL reports only once the robot has moved, so the speed's two seconds are what catch a robot gone silent.
+  its number (NaN), or a position in another frame than the envelope's, stops the run: the door cancels it, again
+  every half second until the robot ends it, and it ends in `<Skill>Stopped` with the reason, whether the robot
+  reports it cancelled or aborted. The position is the latest the robot reported, however old: a localiser such as
+  AMCL reports only once the robot has moved, so the speed's two seconds are what catch a robot gone silent. A run
+  that starts with the robot already outside the bounds (pushed there by hand) goes on, since its goal is inside
+  them and is how the robot gets back; it is held to them once the robot reports itself inside.
+- A skill without a `target` is not held to the fence and zones by its goal, only by what the robot reports while it
+  runs; the door warns at start naming each such skill.
+- A goal accepted before a hold or a change of bounds, refused as it starts, ends in `<Skill>Refused`; that command
+  is spent, so the agent sends the goal again under a new command id.
 
 The owner takes the robot over at the machine the door runs on, with the door's settings:
 
@@ -173,9 +180,9 @@ best-robot hold --now --reason "servicing the arm"
 ```
 
 From then on every skill is refused with 409 `HELD`, naming the reason and since when; a second hold changes the
-reason and keeps the since. `--now` also stops the runs in flight, each ending in `<Skill>Stopped` with the reason,
-and the command says which ended within five seconds and which the door is still cancelling; without it, they run
-on. The hold is in force at once and written to `BEST_ROBOT_DATA`, so a door restarted while held is still held;
+reason (or keeps it, given none) and keeps the since. `--now` also stops the runs in flight, each ending in
+`<Skill>Stopped` with the reason (or as it ended, when it got there first), and the command says which ended within
+five seconds and which the door is still cancelling; without it, they run on. The hold is in force at once and written to `BEST_ROBOT_DATA`, so a door restarted while held is still held;
 when it cannot be written, it is in force all the same and the command warns that a restart would lose it.
 `best-robot release` gives the robot back. The owner's commands refuse a flag they do not take, rather than run
 without it.

@@ -90,6 +90,14 @@ impl Guard {
                     }
                 }
             }
+            if e.geofence.is_some() || !e.zones.is_empty() {
+                for s in inner.skills().iter().filter(|s| s.target.is_none()) {
+                    tracing::warn!(
+                        skill = %s.name,
+                        "this skill names no target, so its goals are not held to the geofence or the zones; only what the robot reports while it runs is"
+                    );
+                }
+            }
         }
         Ok(Self {
             inner,
@@ -110,10 +118,11 @@ impl Guard {
         for (_, r) in &runs {
             r.stop_for(reason);
         }
+        let deadline = tokio::time::Instant::now() + STOP_WITHIN;
         let mut stopped = Vec::new();
         for (id, r) in runs {
             let mut ended = r.ended.subscribe();
-            let done = tokio::time::timeout(STOP_WITHIN, ended.wait_for(|e| *e)).await.is_ok();
+            let done = tokio::time::timeout_at(deadline, ended.wait_for(|e| *e)).await.is_ok();
             stopped.push((id, done));
         }
         stopped
@@ -148,67 +157,80 @@ impl Guard {
         self.inner.check(skill, goal)
     }
 
-    /// Why what the robot reports breaks the envelope, if it does. A reading without its number (NaN, or a message
-    /// without the field) breaks it too: the bound cannot be held on it.
-    fn breach(&self) -> Option<String> {
+    /// Where the robot last reported it is, held to the envelope; none when nothing is read or reported yet.
+    fn position(&self) -> Option<Place> {
         let (e, topics) = (self.envelope.as_ref()?, self.topics.as_ref()?);
-        let number = |m: &Value, at: &str, topic: &str| {
-            m.pointer(at).and_then(Value::as_f64).ok_or_else(|| {
-                format!("the robot reported no number at {at} on {topic}, so the bounds its owner set cannot be held")
-            })
-        };
-        if let Some(p) = &e.position {
-            if let Some(s) = topics.latest(&p.topic) {
-                let at = number(&s.message, &p.x, &p.topic).and_then(|x| Ok((x, number(&s.message, &p.y, &p.topic)?)));
-                let (x, y) = match at {
-                    Ok(at) => at,
-                    Err(why) => return Some(why),
-                };
-                if let Err(r) = e.within(x, y) {
-                    return Some(format!(
-                        "the robot reported it is at x {x:.2}, y {y:.2}, which leaves the bounds its owner set ({})",
-                        r.code
-                    ));
-                }
+        let p = e.position.as_ref()?;
+        let s = topics.latest(&p.topic)?;
+        if let Some(frame) = s.message.pointer("/header/frame_id").and_then(Value::as_str) {
+            if frame != e.frame {
+                return Some(Place::Unheld(format!(
+                    "the robot reports where it is in frame {frame:?}, and the bounds its owner set are in {:?}, so they cannot be held",
+                    e.frame
+                )));
             }
         }
-        if let Some(sp) = &e.speed {
-            let fresh = topics
-                .latest(&sp.topic)
-                .filter(|s| s.received_at.elapsed().is_ok_and(|age| age <= SPEED_WITHIN));
-            let Some(s) = fresh else {
-                return Some(format!(
-                    "the robot has not reported its speed for {} s, so the {} m/s its owner allows cannot be held",
-                    SPEED_WITHIN.as_secs(),
-                    sp.max
-                ));
-            };
-            let v = match (
-                number(&s.message, &sp.x, &sp.topic),
-                number(&s.message, &sp.y, &sp.topic),
-            ) {
-                (Ok(x), Ok(y)) => x.hypot(y),
-                (Err(why), _) | (_, Err(why)) => return Some(why),
-            };
-            if v > sp.max {
-                return Some(format!(
-                    "the robot reported moving at {v:.2} m/s, above the {} m/s its owner allows",
-                    sp.max
-                ));
-            }
-        }
-        None
+        let at = number(&s.message, &p.x, &p.topic).and_then(|x| Ok((x, number(&s.message, &p.y, &p.topic)?)));
+        Some(match at {
+            Err(why) => Place::Unheld(why),
+            Ok((x, y)) => match e.within(x, y) {
+                Ok(()) => Place::Inside,
+                Err(r) => Place::Outside(format!(
+                    "the robot reported it is at x {x:.2}, y {y:.2}, outside the bounds its owner set ({})",
+                    r.code
+                )),
+            },
+        })
     }
 
-    /// Resolves with the first breach, read every [`WATCH_EVERY`]; never, when the envelope reads nothing.
+    /// Why what the robot reports of its speed breaks the ceiling, if it does: too fast, not heard from, or without
+    /// its numbers.
+    fn too_fast(&self) -> Option<String> {
+        let (e, topics) = (self.envelope.as_ref()?, self.topics.as_ref()?);
+        let sp = e.speed.as_ref()?;
+        let fresh = topics
+            .latest(&sp.topic)
+            .filter(|s| s.received_at.elapsed().is_ok_and(|age| age <= SPEED_WITHIN));
+        let Some(s) = fresh else {
+            return Some(format!(
+                "the robot has not reported its speed for {} s, so the {} m/s its owner allows cannot be held",
+                SPEED_WITHIN.as_secs(),
+                sp.max
+            ));
+        };
+        let v = match (
+            number(&s.message, &sp.x, &sp.topic),
+            number(&s.message, &sp.y, &sp.topic),
+        ) {
+            (Ok(x), Ok(y)) => x.hypot(y),
+            (Err(why), _) | (_, Err(why)) => return Some(why),
+        };
+        (v > sp.max).then(|| {
+            format!(
+                "the robot reported moving at {v:.2} m/s, above the {} m/s its owner allows",
+                sp.max
+            )
+        })
+    }
+
+    /// Resolves with the first breach, read every [`WATCH_EVERY`]; never, when the envelope reads nothing. A run that
+    /// starts with the robot already outside the bounds (pushed there by hand, say) goes on, since its goal is inside
+    /// them and is how the robot gets back: the position is held once the robot reports itself inside.
     async fn watch(&self) -> String {
         let reads = self.envelope.as_ref().is_some_and(|e| !e.readings().is_empty());
         if !reads {
             return std::future::pending().await;
         }
+        let mut armed = !matches!(self.position(), Some(Place::Outside(_)));
         loop {
             tokio::time::sleep(WATCH_EVERY).await;
-            if let Some(why) = self.breach() {
+            match self.position() {
+                Some(Place::Inside) => armed = true,
+                Some(Place::Outside(why)) if armed => return why,
+                Some(Place::Unheld(why)) => return why,
+                _ => {}
+            }
+            if let Some(why) = self.too_fast() {
                 return why;
             }
         }
@@ -225,7 +247,10 @@ impl Guard {
         // Admitted again here, before the goal is sent and after the run is listed: a hold taken before this refuses
         // the run, and one taken after it finds the run to stop.
         if let Err(r) = self.admits(skill, &goal) {
-            return Ok(Outcome::Refused(r.message));
+            return Ok(Outcome::Refused(format!(
+                "{}; this command is spent, so send it under a new command id",
+                r.message
+            )));
         }
         let mut running = std::pin::pin!(self.inner.run(run, skill, goal, progress));
         let breach = tokio::select! {
@@ -246,10 +271,27 @@ impl Guard {
             }
         };
         match end {
-            Ok(Outcome::Canceled(result)) => Ok(Outcome::Stopped { reason, result }),
+            // Aborted too: a robot may abort the goal it is being made to give up. One that got there first succeeded.
+            Ok(Outcome::Canceled(result) | Outcome::Aborted(result)) => Ok(Outcome::Stopped { reason, result }),
             end => end,
         }
     }
+}
+
+/// Where the robot reports it is, against its owner's bounds.
+enum Place {
+    Inside,
+    /// Outside the fence or in a zone: why, to its holder.
+    Outside(String),
+    /// Not to be judged: no number where the envelope reads one, or another frame. Why, to its holder.
+    Unheld(String),
+}
+
+/// The number at `at` in a message on `topic`, or why the bounds cannot be held without it.
+fn number(m: &Value, at: &str, topic: &str) -> Result<f64, String> {
+    m.pointer(at).and_then(Value::as_f64).ok_or_else(|| {
+        format!("the robot reported no number at {at} on {topic}, so the bounds its owner set cannot be held")
+    })
 }
 
 #[async_trait]
@@ -308,6 +350,24 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
         json!({ "frame": "map", "x": x, "y": y })
     }
 
+    /// A guard over `skills` whose topics the test keeps, to publish on while a run goes.
+    fn guard_over(
+        skills: FakeSkills,
+        envelope: &str,
+        topics: Arc<FakeTopics>,
+    ) -> (Guard, Arc<FakeSkills>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = Arc::new(skills);
+        let g = Guard::new(
+            skills.clone(),
+            Some(Envelope::parse(envelope).unwrap()),
+            Some(topics as Arc<dyn Topics>),
+            Arc::new(Hold::open(dir.path()).unwrap()),
+        )
+        .unwrap();
+        (g, skills, dir)
+    }
+
     fn guard(
         skills: FakeSkills,
         envelope: &str,
@@ -356,7 +416,7 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
         while skills.goals().is_empty() {
             tokio::task::yield_now().await;
         }
-        hold.hold("the owner is servicing it", "2026-11-05T00:00:00Z")
+        hold.hold(Some("the owner is servicing it"), "2026-11-05T00:00:00Z")
             .1
             .unwrap();
         let refused = g.check("go", &goal(1.0, 1.0)).unwrap_err();
@@ -382,7 +442,7 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
                 let g = g.clone();
                 tokio::spawn(async move { g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await })
             };
-            hold.hold("taken over", "2026-11-05T00:00:00Z").1.unwrap();
+            hold.hold(Some("taken over"), "2026-11-05T00:00:00Z").1.unwrap();
             g.stop_all("taken over").await;
             let end = tokio::time::timeout(Duration::from_secs(5), running)
                 .await
@@ -451,13 +511,122 @@ x = \"/x\"
 y = \"/y\"
 "
         );
-        let topics = FakeTopics::new(vec![numbers("pose", &["x", "y"])]).with("pose", json!({ "x": 0.1, "y": 0.0 }));
-        let (g, _, _, _dir) = guard(FakeSkills::new(vec![go()]).held("go", vec![]), &envelope, Some(topics));
-        let end = g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await.unwrap();
+        let topics =
+            Arc::new(FakeTopics::new(vec![numbers("pose", &["x", "y"])]).with("pose", json!({ "x": 1.0, "y": 1.0 })));
+        let (g, skills, _) = guard_over(
+            FakeSkills::new(vec![go()]).held("go", vec![]),
+            &envelope,
+            topics.clone(),
+        );
+        let g = Arc::new(g);
+        let running = {
+            let g = g.clone();
+            tokio::spawn(async move { g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await })
+        };
+        while skills.goals().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        topics.publish("pose", json!({ "x": 0.1, "y": 0.0 }));
+        let end = running.await.unwrap().unwrap();
         assert!(
             matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("IN_FORBIDDEN_ZONE")),
             "{end:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_starts_with_the_robot_outside_goes_on_until_it_is_back_inside_and_leaves_again() {
+        let envelope = format!(
+            "{ENVELOPE}[position]
+topic = \"pose\"
+x = \"/x\"
+y = \"/y\"
+"
+        );
+        // Pushed into the zone by hand while the door was idle.
+        let topics =
+            Arc::new(FakeTopics::new(vec![numbers("pose", &["x", "y"])]).with("pose", json!({ "x": 0.1, "y": 0.0 })));
+        let (g, skills, _) = guard_over(
+            FakeSkills::new(vec![go()]).held("go", vec![]),
+            &envelope,
+            topics.clone(),
+        );
+        let g = Arc::new(g);
+        let running = {
+            let g = g.clone();
+            tokio::spawn(async move { g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await })
+        };
+        while skills.goals().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(WATCH_EVERY * 3).await;
+        assert!(
+            !running.is_finished(),
+            "a run that brings the robot back is not stopped for where it started"
+        );
+        topics.publish("pose", json!({ "x": 1.0, "y": 0.0 }));
+        tokio::time::sleep(WATCH_EVERY * 2).await;
+        topics.publish("pose", json!({ "x": 3.0, "y": 0.0 }));
+        let end = running.await.unwrap().unwrap();
+        assert!(
+            matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("OUTSIDE_GEOFENCE")),
+            "{end:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_position_in_another_frame_stops_the_run() {
+        let envelope = format!(
+            "{ENVELOPE}[position]
+topic = \"pose\"
+x = \"/x\"
+y = \"/y\"
+"
+        );
+        let topics = FakeTopics::new(vec![numbers("pose", &["x", "y"])])
+            .with("pose", json!({ "header": { "frame_id": "odom" }, "x": 1.0, "y": 1.0 }));
+        let (g, _, _, _dir) = guard(FakeSkills::new(vec![go()]).held("go", vec![]), &envelope, Some(topics));
+        let end = g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await.unwrap();
+        assert!(
+            matches!(&end, Outcome::Stopped { reason, .. } if reason.contains("frame \"odom\"")),
+            "{end:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_the_robot_aborts_while_it_is_stopped_is_told_as_stopped() {
+        let fake = FakeSkills::new(vec![go()]).held_ending("go", vec![], Outcome::Aborted(json!({ "code": 1 })));
+        let (g, skills, _, _dir) = guard(fake, ENVELOPE, None);
+        let g = Arc::new(g);
+        let running = {
+            let g = g.clone();
+            tokio::spawn(async move { g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await })
+        };
+        while skills.goals().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(g.stop_all("taken over").await, vec![("r1".to_string(), true)]);
+        let end = running.await.unwrap().unwrap();
+        assert_eq!(
+            end,
+            Outcome::Stopped {
+                reason: "taken over".into(),
+                result: json!({ "code": 1 })
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_refused_as_it_starts_says_its_command_is_spent() {
+        let fake = FakeSkills::new(vec![go()]).ends("go", vec![], Outcome::Succeeded(json!({})));
+        let (g, skills, hold, _dir) = guard(fake, ENVELOPE, None);
+        hold.hold(None, "2026-11-05T00:00:00Z").1.unwrap();
+        let end = g.run("r1", "go", goal(1.0, 1.0), Box::new(|_| {})).await.unwrap();
+        assert!(
+            matches!(&end, Outcome::Refused(why) if why.contains("new command id")),
+            "{end:?}"
+        );
+        assert!(skills.goals().is_empty());
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub fn hold(settings: &Settings, now: bool, reason: Option<&str>) -> Result<Stri
     for s in body["stopped"].as_array().into_iter().flatten() {
         let run = s["run"].as_str().unwrap_or("?");
         lines.push(match s["ended"].as_bool() {
-            Some(true) => format!("stopped run {run}, told to its holder"),
+            Some(true) => format!("run {run} has ended, and its holder is told how"),
             _ => {
                 format!("run {run} has not ended yet: the door keeps cancelling it; stop it at the robot if it runs on")
             }
@@ -357,7 +357,7 @@ mod tests {
                 assert_eq!(s.send(&key, "go", "Go", "run-1", place.clone()).0, 201);
                 s.events_until(&key, "run-1", &["GoProgressed"]);
                 let said = hold(&s.settings, true, Some("servicing the arm")).unwrap();
-                assert!(said.contains("stopped run"), "{said}");
+                assert!(said.contains("has ended"), "{said}");
                 let events = s.events_until(&key, "run-1", &["GoStopped"]);
                 let reason = events.last().unwrap()["data"]["reason"].as_str().unwrap().to_string();
                 assert!(reason.contains("servicing the arm"), "{reason}");

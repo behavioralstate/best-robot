@@ -95,10 +95,15 @@ impl FakeSkills {
     }
 
     /// `skill` sends `feedback`, then runs until it is cancelled.
-    pub fn held(mut self, skill: &str, feedback: Vec<Value>) -> Self {
+    pub fn held(self, skill: &str, feedback: Vec<Value>) -> Self {
+        self.held_ending(skill, feedback, Outcome::Canceled(Value::Null))
+    }
+
+    /// Held as [`held`](Self::held), and ending as `end` when cancelled: a robot that aborts what it is made to give up.
+    pub fn held_ending(mut self, skill: &str, feedback: Vec<Value>, end: Outcome) -> Self {
         let script = Script {
             feedback,
-            end: Ok(Outcome::Canceled(Value::Null)),
+            end: Ok(end),
             held: true,
         };
         self.scripts.insert(skill.into(), script);
@@ -146,28 +151,32 @@ impl Skills for FakeSkills {
 }
 
 /// Topics whose latest messages are the ones it was given: dated long ago, or, for a live one, just now on every read,
-/// as a topic the robot keeps publishing.
+/// as a topic the robot keeps publishing. `publish` gives a live one a new message while the test runs.
 pub struct FakeTopics {
     specs: Vec<TopicSpec>,
-    latest: HashMap<String, (Value, bool)>,
+    latest: Mutex<HashMap<String, (Value, bool)>>,
 }
 
 impl FakeTopics {
     pub fn new(specs: Vec<TopicSpec>) -> Self {
         Self {
             specs,
-            latest: HashMap::new(),
+            latest: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn with(mut self, topic: &str, message: Value) -> Self {
-        self.latest.insert(topic.into(), (message, false));
+    pub fn with(self, topic: &str, message: Value) -> Self {
+        self.latest.lock().unwrap().insert(topic.into(), (message, false));
         self
     }
 
-    pub fn live(mut self, topic: &str, message: Value) -> Self {
-        self.latest.insert(topic.into(), (message, true));
+    pub fn live(self, topic: &str, message: Value) -> Self {
+        self.publish(topic, message);
         self
+    }
+
+    pub fn publish(&self, topic: &str, message: Value) {
+        self.latest.lock().unwrap().insert(topic.into(), (message, true));
     }
 }
 
@@ -177,7 +186,7 @@ impl Topics for FakeTopics {
     }
 
     fn latest(&self, topic: &str) -> Option<Snapshot> {
-        self.latest.get(topic).map(|(m, live)| Snapshot {
+        self.latest.lock().unwrap().get(topic).map(|(m, live)| Snapshot {
             message: m.clone(),
             received_at: if *live {
                 SystemTime::now()
