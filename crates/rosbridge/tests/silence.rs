@@ -37,12 +37,20 @@ async fn a_run_on_a_silent_rosbridge_ends_unreachable_and_the_bridge_reconnects_
     docker("pause", &container);
     let started = Instant::now();
     let ended = tokio::time::timeout(Duration::from_secs(15), running).await;
+    // Still silent: a goal sent now never leaves the door, and says so.
+    let unsent = rb
+        .run("unsent", "fibonacci", json!({ "order": 2 }), Box::new(|_| {}))
+        .await;
     docker("unpause", &container);
     let ended = ended
         .expect("the run was still waiting on a silent rosbridge after fifteen seconds")
         .unwrap();
     assert!(ended.is_err(), "{ended:?}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(
+        matches!(&unsent, Ok(Outcome::Refused(why)) if why.contains("not sent")),
+        "{unsent:?}"
+    );
 
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;

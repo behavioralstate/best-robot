@@ -147,11 +147,12 @@ fn command(spec: &SkillSpec, skills: Arc<dyn Skills>) -> CommandDef {
     }
 }
 
-/// A run's feedback as events, at most one each [`PROGRESS_EVERY`]: one that comes sooner waits, replaced by any newer,
-/// and the one still waiting when the run ends is told before its outcome.
+/// A run's feedback as events, at most one each [`PROGRESS_EVERY`]: one that comes sooner waits for the window to
+/// close, replaced by any newer, and is told then; the one still waiting when the run ends is told before its outcome.
 struct Paced {
     emitter: Emitter,
     event_type: String,
+    /// When feedback was last told, and the one waiting to be.
     state: Mutex<(Option<Instant>, Option<Value>)>,
 }
 
@@ -164,20 +165,34 @@ impl Paced {
         }
     }
 
-    fn feedback(&self, feedback: Value) {
+    fn feedback(self: &Arc<Self>, feedback: Value) {
         let mut state = self.state.lock().unwrap();
         let (told, waiting) = &mut *state;
-        if told.is_some_and(|t| t.elapsed() < PROGRESS_EVERY) {
-            *waiting = Some(feedback);
-        } else {
-            *told = Some(Instant::now());
-            *waiting = None;
-            self.emitter.emit(&self.event_type, json!({ "feedback": feedback }));
+        match told.map(|t| t.elapsed()).filter(|e| *e < PROGRESS_EVERY) {
+            Some(elapsed) => {
+                // The first to wait in this window sets the timer that tells whichever is waiting when it closes.
+                if waiting.replace(feedback).is_none() {
+                    let paced = self.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(PROGRESS_EVERY - elapsed).await;
+                        paced.flush();
+                    });
+                }
+            }
+            None => {
+                *told = Some(Instant::now());
+                *waiting = None;
+                self.emitter.emit(&self.event_type, json!({ "feedback": feedback }));
+            }
         }
     }
 
+    /// Tells the feedback waiting, if any. The lock is held while it is told, so it is told before an outcome that
+    /// follows a flush.
     fn flush(&self) {
-        if let Some(feedback) = self.state.lock().unwrap().1.take() {
+        let mut state = self.state.lock().unwrap();
+        if let Some(feedback) = state.1.take() {
+            state.0 = Some(Instant::now());
             self.emitter.emit(&self.event_type, json!({ "feedback": feedback }));
         }
     }
@@ -279,6 +294,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feedback_held_back_is_told_once_its_window_closes_not_at_the_end() {
+        let fake = FakeSkills::new(vec![spec("count")]).held("count", vec![json!({ "at": 1 }), json!({ "at": 2 })]);
+        let (door, _) = door(fake).await;
+        door.send("count", "Count", "c1", json!({})).await;
+        for _ in 0..60 {
+            let (_, body) = door.get("/events?correlationId=c1").await;
+            let events = body["events"].as_array().cloned().unwrap_or_default();
+            if events.len() == 2 {
+                assert_eq!(types(&events), ["CountProgressed", "CountProgressed"]);
+                assert_eq!(events[1]["data"]["feedback"]["at"], 2);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the held feedback was not told while the run went on");
+    }
+
+    #[tokio::test]
     async fn a_goal_with_a_field_the_type_lacks_is_refused_at_the_door_naming_it() {
         let (door, skills) = door(FakeSkills::new(vec![spec("count")])).await;
         let (status, body) = door.send("count", "Count", "c1", json!({ "too": 2 })).await;
@@ -302,7 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_sender_cancels_its_own_run_and_it_ends_cancelled() {
-        let (door, _) = door(FakeSkills::new(vec![spec("count")]).held("count")).await;
+        let (door, _) = door(FakeSkills::new(vec![spec("count")]).held("count", vec![])).await;
         door.send("count", "Count", "run-1", json!({})).await;
         let mut requested = false;
         for i in 0..100 {
@@ -338,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_agent_cannot_cancel_a_run_it_did_not_start() {
-        let (door, _) = door(FakeSkills::new(vec![spec("count")]).held("count")).await;
+        let (door, _) = door(FakeSkills::new(vec![spec("count")]).held("count", vec![])).await;
         door.send("count", "Count", "run-1", json!({})).await;
         let other = door.other();
         for i in 0..20 {

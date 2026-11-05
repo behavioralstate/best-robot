@@ -94,10 +94,10 @@ impl FakeSkills {
         self
     }
 
-    /// `skill` runs until it is cancelled.
-    pub fn held(mut self, skill: &str) -> Self {
+    /// `skill` sends `feedback`, then runs until it is cancelled.
+    pub fn held(mut self, skill: &str, feedback: Vec<Value>) -> Self {
         let script = Script {
-            feedback: vec![],
+            feedback,
             end: Ok(Outcome::Canceled(Value::Null)),
             held: true,
         };
@@ -197,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_held_skill_runs_until_cancelled() {
-        let skills = Arc::new(FakeSkills::new(vec![]).held("wait"));
+        let skills = Arc::new(FakeSkills::new(vec![]).held("wait", vec![]));
         let running = {
             let skills = skills.clone();
             tokio::spawn(async move { skills.run("r1", "wait", json!({}), Box::new(|_| {})).await })
