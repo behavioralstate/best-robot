@@ -47,12 +47,12 @@
   --workspace --all-targets -- -D warnings`, `cargo test --workspace`, a release build, then `best-validate` on the
   served door, anonymous and signed in through the device flow and the real `best-robot approve`, then the rosbridge
   lane: the ROS 2 testbed in a container, the adapter's testbed tests, the door over it validated signed in, and a goal
-  sent through the door and read back as events; then the nav2 lane: the simulated robot driven through the door to a
-  pose and back, out of the map and cancelled on the way, each read back as events, then behind the owner's envelope:
-  a goal outside the geofence and one in a forbidden zone refused, a key scoped to one skill refused another, and
-  `best-robot hold --now` stopping a navigation, held across a restart, until `best-robot release`, and a navigation
-  stopped above a speed ceiling on the robot's odometry. It ends in `GATE GREEN` or
-  `GATE RED`; CI runs the same script.
+  sent through the door and read back as events; then the nav2 lane: the simulated robot's camera read through the door
+  as an address and a digest and the JPEG served there checked against both, the robot driven to a pose and back, out of
+  the map and cancelled on the way, each read back as events, then behind the owner's envelope: a goal outside the
+  geofence and one in a forbidden zone refused, a key scoped to one skill refused another, and `best-robot hold --now`
+  stopping a navigation, held across a restart, until `best-robot release`, and a navigation stopped above a speed
+  ceiling on the robot's odometry. It ends in `GATE GREEN` or `GATE RED`; CI runs the same script.
 
 ## 4. Ship
 

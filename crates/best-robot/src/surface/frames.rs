@@ -36,18 +36,21 @@ impl Frames {
         })
     }
 
-    /// Keeps `frame`, the oldest kept let go past [`KEPT`], and names it.
+    /// Keeps `frame` as the newest, the oldest kept let go past [`KEPT`], and names it. An image named again is the
+    /// newest again, so the address just handed out is never the next one let go.
     pub fn keep(&self, frame: &Frame) -> Named {
         let sha256: String = Sha256::digest(&frame.bytes)
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
         let mut kept = self.kept.lock().unwrap();
-        if !kept.iter().any(|(d, _)| *d == sha256) {
-            kept.push_back((sha256.clone(), Arc::new(frame.bytes.clone())));
-            while kept.len() > KEPT {
-                kept.pop_front();
-            }
+        let bytes = match kept.iter().position(|(d, _)| *d == sha256) {
+            Some(at) => kept.remove(at).map(|(_, b)| b).unwrap(),
+            None => Arc::new(frame.bytes.clone()),
+        };
+        kept.push_back((sha256.clone(), bytes));
+        while kept.len() > KEPT {
+            kept.pop_front();
         }
         Named {
             url: format!("{}/frames/{sha256}", self.endpoint),
@@ -143,5 +146,20 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(String::from_utf8(said).unwrap().contains("read the topic again"));
         assert_eq!(get(&frames, "0".repeat(64).as_str()).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_image_named_again_is_the_newest_and_outlives_the_next_new_one() {
+        let frames = Frames::new("http://127.0.0.1:7780");
+        let first = frames.keep(&frame(0));
+        for n in 1..KEPT as u8 {
+            frames.keep(&frame(n));
+        }
+        // A still camera sees the same bytes again: that address was just handed out, so it is kept past the next.
+        frames.keep(&frame(0));
+        frames.keep(&frame(KEPT as u8));
+        assert_eq!(get(&frames, &first.sha256).await.0, StatusCode::OK);
+        assert_eq!(get(&frames, &frames.keep(&frame(1)).sha256).await.0, StatusCode::OK);
+        assert_eq!(frames.kept.lock().unwrap().len(), KEPT);
     }
 }
