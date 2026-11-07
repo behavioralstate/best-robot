@@ -21,7 +21,9 @@ An agent with nothing but the person's sentence and the published connector drov
 manifest alone: it signed in, read where the robot was, navigated, was refused a goal outside the fence and went to
 the nearest admitted place instead, cancelled a navigation, and read back what it had done.
 [acceptance/drive-from-the-manifest.md](acceptance/drive-from-the-manifest.md) is the record of that run, with its
-transcript.
+transcript. Another, from two manifests, signed in to this door and to a best-peer door, showed a vision model the
+robot's camera image by address and digest, and drove the robot as far as the model said the way was clear:
+[acceptance/one-task-across-two-doors.md](acceptance/one-task-across-two-doors.md).
 
 ## Try it
 
@@ -112,8 +114,8 @@ rosbridge that doesn't answer within fifteen seconds, stops it with the reason. 
   at that address, `/frames/<sha256>`, beside its BEST surface, and keeps the latest 8 images it named; an older
   address answers 404, and reading the topic again names the newest. The digest is what reaches an image: an agent
   hands the address and the digest to whatever looks at it, such as a model on a best-peer door, which fetches it
-  and checks the bytes. The address asks for no key: whoever holds a digest the door named can read that image while
-  it is kept. On loopback that is this machine alone; a proxy that serves the door to others serves its images to
+  and checks the bytes ([one task across two doors](acceptance/one-task-across-two-doors.md) is such a run). The
+  address asks for no key: whoever holds a digest the door named can read that image while it is kept. On loopback that is this machine alone; a proxy that serves the door to others serves its images to
   them too, so one that should not passes `/frames/` to no one.
 
 Each integer field is held to its ROS width, and a float32 to its range, so a goal number the type cannot carry is
