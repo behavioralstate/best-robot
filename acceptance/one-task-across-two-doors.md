@@ -32,7 +32,7 @@ the transcript.
     request on, so to the peer the engine was a local Ollama. Its log shows the deploy's `GET /` and `POST /api/pull`
     at 10:43:03, and one `POST /v1/chat/completions` answered at 10:45:27.
   - The model, `gemma3:4b` (3.9B parameters, Q4_K_M, with its vision encoder), was pulled onto the engine before the
-    run, from 10:28 to 10:42, since the host's link is slow; the agent's deploy then found it there.
+    run, from 10:30 to 10:42, since the host's link is slow; the agent's deploy then found it there.
   - The job ran from 10:26:58 to 10:47:09: 1211 seconds billed, EUR 0.23.
 - **The client**: Claude Code 2.1.319 on Claude Sonnet 5.5, one headless process (`claude -p` reading the person's
   turns as stream-json), in an empty folder, with the person's sentence as its first message, set up as in
@@ -100,7 +100,8 @@ door's `/frames/` address after the run and checked against that digest.
 This transcript is rendered from the client's own session log, as the drive's run is:
 - every message in order;
 - tool calls numbered with their arguments;
-- each call's result under it, shortened where it ran past a screen, with event lists as one line per event;
+- each call's result under it, or under the second of two calls sent together, in the same order, shortened where
+  it ran past a screen, with event lists as one line per event;
 - the person's sentence and answers, which reached the client on its input and are placed where they were given.
 
 The credentials appear only as the connector's redaction, and the scratch folder's path is masked. The tool search's
@@ -357,6 +358,8 @@ Tell me when you've approved it. I'll then finish the sign-in and go on to the c
 
 11. `best-get_manifest` {"connection": "run266"}
 
+   Calls 10 and 11 were sent together; their results follow in the same order.
+
    ```
    This endpoint publishes no workflows.
    ```
@@ -418,6 +421,8 @@ Tell me when you've approved it. I'll then finish the sign-in and go on to the c
 12. `best-get_command_catalogue` {"connection": "run266", "detail": "full"}
 
 13. `best-get_query_catalogue` {"connection": "run266", "detail": "full"}
+
+   Calls 12 and 13 were sent together; their results follow in the same order.
 
    ```
    [
@@ -897,6 +902,8 @@ Tell me when you've approved it. I'll then finish the sign-in and go on to the c
 
 31. `best-get_events` {"connection": "run266", "params": {"correlationId": "28823be7-a023-42f2-b67c-a15554e375e2"}}
 
+   Calls 30 and 31 were sent together; their results follow in the same order.
+
    ```
    1 events:
    10:45:27.061 PromptAnswered 28823be7… {"completion_tokens": 85, "content": "1.5\n\nExplanation:\nThe image shows a cluttered environment with several obstacles. The robot's field of view is approximately 60 degrees.  Considering the size of the obstacles and the limited field of view, the robot can likely only drive about 1.5 meters before it would hit something. The green block is the most immediate obstacle, and the robot's view is partially obscured by it.", "deployment": "dep-ac7b1e34c12d", "finish": "stop", "images": [{"sha256": "6742a402cb6e7d365a2c9bcbfc6739f5f9a7c514e534115e40358890390d2303", "url": "http://127.0.0.1:7780/frames/6742a402cb6e7d365a2c9bcbfc6739f5f9a7c514e534115e40358890390d2303"}], "model": "gemma3:4b", "prompt_tokens": 336}
@@ -990,6 +997,8 @@ Tell me when you've approved it. I'll then finish the sign-in and go on to the c
 34. `best-sample_event_stream` {"connection": "run266-robot", "params": {"correlationId": "8475c3a0-caa8-46cf-a5a6-70f3c055159a"}, "max_events": 30, "max_seconds": 45}
 
 35. `best-get_events` {"connection": "run266-robot", "params": {"correlationId": "8475c3a0-caa8-46cf-a5a6-70f3c055159a"}}
+
+   Calls 34 and 35 were sent together; their results follow in the same order.
 
    ```
    5 events:

@@ -115,8 +115,9 @@ rosbridge that doesn't answer within fifteen seconds, stops it with the reason. 
   address answers 404, and reading the topic again names the newest. The digest is what reaches an image: an agent
   hands the address and the digest to whatever looks at it, such as a model on a best-peer door, which fetches it
   and checks the bytes ([one task across two doors](acceptance/one-task-across-two-doors.md) is such a run). The
-  address asks for no key: whoever holds a digest the door named can read that image while it is kept. On loopback that is this machine alone; a proxy that serves the door to others serves its images to
-  them too, so one that should not passes `/frames/` to no one.
+  address asks for no key: whoever holds a digest the door named can read that image while it is kept. On loopback
+  that is this machine alone; a proxy that serves the door to others serves its images to them too, so one that
+  should not passes `/frames/` to no one.
 
 Each integer field is held to its ROS width, and a float32 to its range, so a goal number the type cannot carry is
 refused with a 400 rather than wrapped. A float the robot sends may be null: that is how rosbridge writes NaN and infinity.
