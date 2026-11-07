@@ -10,7 +10,7 @@ repository.workspace = true
 robot = { path = "../robot" }
 rosbridge = { path = "../rosbridge" }
 # The door is best-peer's, written from the spec text, pinned to a release: a change it needs is made there first.
-best-peer-door = { git = "https://github.com/behavioralstate/best-peer", tag = "v0.0.35" }
+best-peer-door = { git = "https://github.com/behavioralstate/best-peer", tag = "v0.0.36" }
 async-trait = { workspace = true }
 # The version the door's router is built on.
 axum = "0.7"

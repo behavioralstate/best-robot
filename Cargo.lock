@@ -117,8 +117,8 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "best-peer-door"
-version = "0.0.35"
-source = "git+https://github.com/behavioralstate/best-peer?tag=v0.0.35#c27be8f46566f344e26ab2fc8b534c350e83a1fb"
+version = "0.0.36"
+source = "git+https://github.com/behavioralstate/best-peer?tag=v0.0.36#2b3bd588925932cff6ecfff8190faaa5e4f68a81"
 dependencies = [
  "async-trait",
  "axum",
