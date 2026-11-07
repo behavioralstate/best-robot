@@ -2,6 +2,7 @@
 //! with their events, its topics as queries. Each part is optional, as far as the adapter behind it goes; the wire
 //! shapes live in these modules, next to their schemas.
 
+pub mod frames;
 mod skills;
 mod state;
 mod topics;
@@ -11,6 +12,8 @@ use std::sync::Arc;
 
 use best_peer_door::Catalogue;
 use robot::{Robot, Skills, Topics};
+
+use frames::Frames;
 
 pub struct Parts {
     pub state: Option<Arc<dyn Robot>>,
@@ -36,8 +39,9 @@ pub fn describe(parts: &Parts) -> String {
     }
 }
 
-/// The catalogue over `parts`, or why two of them would answer to the same name or type.
-pub fn catalogue(parts: Parts) -> Result<Catalogue, String> {
+/// The catalogue over `parts`, a camera's images kept in `frames`, or why two parts would answer to the same name or
+/// type.
+pub fn catalogue(parts: Parts, frames: &Arc<Frames>) -> Result<Catalogue, String> {
     let mut names = HashSet::new();
     let mut claim = |name: String, what: &str| {
         if names.insert(name.clone()) {
@@ -70,7 +74,7 @@ pub fn catalogue(parts: Parts) -> Result<Catalogue, String> {
         for spec in t.topics() {
             claim(topics::query_name(&spec.name), &format!("topic {}", spec.name))?;
         }
-        c = topics::add(c, t);
+        c = topics::add(c, t, frames);
     }
     Ok(c)
 }
@@ -93,6 +97,10 @@ mod tests {
     use super::*;
     use robot::{FakeSkills, FakeTopics, SkillSpec, TopicSpec};
     use serde_json::json;
+
+    fn frames() -> Arc<Frames> {
+        Frames::new("http://door.test")
+    }
 
     fn skill(name: &str) -> SkillSpec {
         SkillSpec {
@@ -118,10 +126,14 @@ mod tests {
             skills: Some(Arc::new(FakeSkills::new(vec![skill("cancel-skill")]))),
             topics: None,
         };
-        assert!(catalogue(shadowing_cancel).err().unwrap().contains("cancel-skill"));
+        assert!(catalogue(shadowing_cancel, &frames())
+            .err()
+            .unwrap()
+            .contains("cancel-skill"));
         let topic = TopicSpec {
             name: "robot-state".into(),
             description: "d".into(),
+            frames: false,
             message: json!({ "type": "object" }),
         };
         let shadowing_state = Parts {
@@ -129,7 +141,10 @@ mod tests {
             skills: None,
             topics: Some(Arc::new(FakeTopics::new(vec![topic]))),
         };
-        assert!(catalogue(shadowing_state).err().unwrap().contains("get-robot-state"));
+        assert!(catalogue(shadowing_state, &frames())
+            .err()
+            .unwrap()
+            .contains("get-robot-state"));
     }
 
     #[test]
@@ -141,7 +156,7 @@ mod tests {
                 skills: Some(Arc::new(FakeSkills::new(pair.map(skill).to_vec()))),
                 topics: None,
             };
-            assert!(catalogue(parts).is_err(), "{pair:?}");
+            assert!(catalogue(parts, &frames()).is_err(), "{pair:?}");
         }
     }
 
@@ -153,7 +168,7 @@ mod tests {
             topics: None,
         };
         assert_eq!(describe(&none), "A robot: its state, read by query.");
-        let c = catalogue(none).unwrap();
+        let c = catalogue(none, &frames()).unwrap();
         assert!(
             c.command_by_schema(skills::CANCEL, "1.0").is_none(),
             "no skill, nothing to cancel"
@@ -164,7 +179,7 @@ mod tests {
             topics: None,
         };
         assert!(describe(&some).contains("skills"));
-        assert!(catalogue(some)
+        assert!(catalogue(some, &frames())
             .unwrap()
             .command_by_schema(skills::CANCEL, "1.0")
             .is_some());

@@ -1,6 +1,7 @@
 //! The robot's [`Skills`] and [`Topics`] over a ROS 2 rosbridge (2.x, which carries actions). A skill is a ROS 2
 //! action the operator listed, its schemas generated from the type rosapi describes; a topic is one whose latest
-//! message the door keeps. Nothing of ROS reaches past this crate.
+//! message the door keeps, and a topic of `sensor_msgs/msg/CompressedImage` is a camera's, read as frames. Nothing of
+//! ROS reaches past this crate.
 
 mod client;
 pub mod config;
@@ -11,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use robot::{Outcome, Progress, SkillSpec, Skills, Snapshot, Target, TopicSpec, Topics, Unreachable};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
+use robot::{Frame, Outcome, Progress, SkillSpec, Skills, Snapshot, Target, TopicSpec, Topics, Unreachable};
 use serde_json::{json, Value};
 
 use client::Client;
@@ -20,6 +23,9 @@ use schema::Way;
 
 /// How long the door waits for rosbridge at start.
 const CONNECT_WITHIN: Duration = Duration::from_secs(15);
+
+/// The type of a camera's compressed images: a topic of it is read as frames.
+const COMPRESSED_IMAGE: &str = "sensor_msgs/msg/CompressedImage";
 
 /// `action_msgs/msg/GoalStatus`, as rosbridge reports a goal's end.
 const SUCCEEDED: u64 = 4;
@@ -85,6 +91,7 @@ impl Rosbridge {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 message: describe(&client, "/rosapi/message_details", &t.message_type, Way::Out).await?,
+                frames: t.message_type == COMPRESSED_IMAGE,
             });
         }
         Ok(Self {
@@ -186,11 +193,52 @@ impl Topics for Rosbridge {
     fn latest(&self, topic: &str) -> Option<Snapshot> {
         self.ros_topics.get(topic).and_then(|t| self.client.latest(t))
     }
+
+    fn frame(&self, topic: &str) -> Option<Frame> {
+        self.topics.iter().find(|t| t.name == topic && t.frames)?;
+        frame(self.latest(topic)?)
+    }
+}
+
+/// A `CompressedImage` as rosbridge carries it: its format, and its bytes as base64, or as a list of numbers where
+/// rosbridge was told not to encode them. One in neither shape is no frame.
+fn frame(s: Snapshot) -> Option<Frame> {
+    let bytes = match &s.message["data"] {
+        Value::String(b64) => STANDARD.decode(b64).ok()?,
+        Value::Array(numbers) => numbers
+            .iter()
+            .map(|n| n.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect::<Option<Vec<u8>>>()?,
+        _ => return None,
+    };
+    Some(Frame {
+        format: s.message["format"].as_str().unwrap_or_default().to_string(),
+        bytes,
+        received_at: s.received_at,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compressed_image_is_a_frame_whether_rosbridge_sent_its_bytes_as_base64_or_as_numbers() {
+        let at = std::time::SystemTime::UNIX_EPOCH;
+        let snap = |data: Value| Snapshot {
+            message: json!({ "format": "jpeg", "data": data }),
+            received_at: at,
+        };
+        let jpeg = Frame {
+            format: "jpeg".into(),
+            bytes: vec![0xff, 0xd8, 0xff],
+            received_at: at,
+        };
+        assert_eq!(frame(snap(json!("/9j/"))), Some(jpeg.clone()));
+        assert_eq!(frame(snap(json!([255, 216, 255]))), Some(jpeg));
+        assert_eq!(frame(snap(json!([256]))), None);
+        assert_eq!(frame(snap(json!("not base64!"))), None);
+    }
 
     #[test]
     fn a_result_reads_as_its_status_says() {

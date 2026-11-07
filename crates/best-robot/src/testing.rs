@@ -28,7 +28,7 @@ impl Signed {
         let auth = Auth::ephemeral(ENDPOINT, Box::new(FakeApprover { proof: "p".into() }));
         let key = sign_in(&auth, "test").await;
         let other = sign_in(&auth, "other").await;
-        let catalogue = surface::catalogue(parts).unwrap();
+        let catalogue = surface::catalogue(parts, &surface::frames::Frames::new(ENDPOINT)).unwrap();
         let door = Door::new(
             ENDPOINT,
             "io.best.agents",

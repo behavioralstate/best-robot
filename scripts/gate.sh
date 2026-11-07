@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The local proof of SDLC.md section 3: fmt, clippy with warnings as errors, the tests, a release build, then
 # best-validate against the built door on the fake robot, anonymous and signed in through the real device flow and
-# `best-robot approve`; then the rosbridge lane, the same door over a real ROS 2 stack in a container (testbed/rosbridge):
-# the adapter's testbed tests, best-validate signed in, and a goal sent through the door and read back as events; then
-# the nav2 lane, the door driving a simulated TurtleBot3 under Nav2 (testbed/nav2) to a pose and back, out of the map,
-# and cancelled on the way; then, behind the owner's envelope (testbed/nav2/envelope.toml), goals outside the geofence
-# and in a forbidden zone refused with the fix, a key approved for one skill refused another, and `best-robot hold
-# --now` stopping a navigation, kept across a restart of the door, until `best-robot release`, and a navigation stopped
-# when the robot's odometry reports it above a speed ceiling. The last line is GATE
-# GREEN or GATE RED, and nothing else is a pass. CI runs this same script.
+# `best-robot approve`; then the rosbridge lane, the same door over a real ROS 2 stack in a container
+# (testbed/rosbridge): the adapter's testbed tests, best-validate signed in, and a goal sent through the door and read
+# back as events; then the nav2 lane, the door serving the simulated TurtleBot3's camera image by digest, then driving
+# it under Nav2 (testbed/nav2) to a pose and back, out of the map, and cancelled on the way; then, behind the owner's
+# envelope (testbed/nav2/envelope.toml), goals outside the geofence and in a forbidden zone refused with the fix, a key
+# approved for one skill refused another, and `best-robot hold --now` stopping a navigation, kept across a restart of
+# the door, until `best-robot release`, and a navigation stopped when the robot's odometry reports it above a speed
+# ceiling. The last line is GATE GREEN or GATE RED, and nothing else is a pass. CI runs this same script.
 #
 #   scripts/gate.sh [fmt|clippy|test|build|validate|rosbridge|nav2|all]      default: all
 #
@@ -164,6 +164,18 @@ lane_nav2() (
   door_over 7884 "$data/nav2.toml"; door=$!
   key=$(sign_in "$base")
   validate "$base" --api-key "$key" --auth-type apikey --auth-header X-Api-Key
+  # The camera's latest image: named by address and digest, never sent on BEST, and served there as those bytes.
+  for _ in $(seq 1 20); do
+    curl -sf "$base/queries/get-camera" -H "X-Api-Key: $key" > "$data/frame.json"
+    grep -q '"sha256"' "$data/frame.json" && break
+    sleep 0.5
+  done
+  frame() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).frame[process.argv[1]]))' "$1" < "$data/frame.json"; }
+  curl -sf "$(frame url)" -o "$data/frame"
+  node -e 'const c=[];process.stdin.on("data",d=>c.push(d)).on("end",()=>{ const b=Buffer.concat(c),
+    d=require("crypto").createHash("sha256").update(b).digest("hex"), [sha,bytes,url]=process.argv.slice(1);
+    console.log("get-camera:", b.length, "bytes at", url);
+    if(d!==sha||b.length!==+bytes||b[0]!==0xff||b[1]!==0xd8) process.exit(1); })' "$(frame sha256)" "$(frame bytes)" "$(frame url)" < "$data/frame"
   goal() { echo '{ "pose": { "header": { "frame_id": "map" }, "pose": { "position": { "x": '"$1"', "y": '"$2"' }, "orientation": { "w": 1 } } } }'; }
   ended='NavigateTo(Succeeded|Aborted|Canceled|Refused)|CommandFailed'
   send "$base" "$key" navigate-to NavigateTo gate-there "$(goal -0.55 -0.55)"

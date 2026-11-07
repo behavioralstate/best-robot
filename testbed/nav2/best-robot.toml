@@ -21,6 +21,12 @@ type = "geometry_msgs/msg/PoseWithCovarianceStamped"
 description = "Where the robot believes it is in the map frame, and how sure it is."
 
 [[topics]]
+name = "camera"
+topic = "/camera/image/compressed"
+type = "sensor_msgs/msg/CompressedImage"
+description = "What the robot's forward camera sees, 320 by 240 pixels, about 60 degrees across, as a JPEG."
+
+[[topics]]
 name = "odom"
 topic = "/odom"
 type = "nav_msgs/msg/Odometry"

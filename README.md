@@ -62,6 +62,7 @@ door in front of it on the same address as above; Ctrl-C stops both. An agent si
   goal is outside the map), or `NavigateToCanceled` after a `cancel-skill` naming the command.
 - `spin`, Nav2's turn in place by `target_yaw` radians.
 - `get-pose`: where the robot believes it is, from its localisation, and `get-odom`, its odometry.
+- `get-camera`: what its forward camera last saw, as a JPEG named by its address on the door and its SHA-256.
 
 The door's config for it is [`testbed/nav2/best-robot.toml`](testbed/nav2/best-robot.toml), the same shape as below,
 and it runs behind [`testbed/nav2/envelope.toml`](testbed/nav2/envelope.toml): the arena inside the walls as the
@@ -106,6 +107,13 @@ rosbridge that doesn't answer within fifteen seconds, stops it with the reason. 
   in `SkillCancelRequested`, and the run's own event says how it ended; with no such run in flight on the door, it ends
   in `SkillCancelRefused`. A run the door lost track of (it ended in `CommandFailed`) can only be stopped at the robot.
 - **Each topic as a query**, `get-<name>`: the latest message and when it arrived, both null until one has.
+- **A camera's topic** (`sensor_msgs/msg/CompressedImage`) as a query too, whose answer names the latest image and
+  never carries it: `frame` is its `url`, `sha256`, `format` and size in `bytes`. The door serves the image's bytes
+  at that address, `/frames/<sha256>`, beside its BEST surface, and keeps the latest 8 images it named; an older
+  address answers 404, and reading the topic again names the newest. The digest is what reaches an image: an agent
+  hands the address and the digest to whatever looks at it, such as a model on a best-peer door, which fetches it
+  and checks the bytes ([acceptance](acceptance/) has such a run). The door listens on loopback only, so its images
+  are reached from this machine alone.
 
 Each integer field is held to its ROS width, and a float32 to its range, so a goal number the type cannot carry is
 refused with a 400 rather than wrapped. A float the robot sends may be null: that is how rosbridge writes NaN and infinity.
@@ -208,7 +216,8 @@ without it.
 `scripts/gate.sh all` (Git Bash on Windows) ends in `GATE GREEN` or `GATE RED`. CI runs the same script. Its last two
 lanes need Docker: the rosbridge lane builds `testbed/rosbridge` (ROS 2 Jazzy, rosbridge, a test action and a test
 topic) and drives the door over it; the nav2 lane builds `testbed/nav2` (the simulated robot above) and drives it
-through the door to a pose and back, out of the map, and cancelled on the way, then, behind the envelope above, refuses
+through the door to a pose and back, out of the map, and cancelled on the way, after reading its camera's latest
+image by digest and checking the bytes served at its address, then, behind the envelope above, refuses
 a goal outside the fence and one in the zone, refuses `spin` to a key approved `--may navigate-to`, and stops a
 navigation with `hold --now`, still held across a restart of the door, until `release`, and stops one whose
 odometry reports it above a lowered speed ceiling.

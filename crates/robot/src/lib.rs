@@ -11,7 +11,7 @@ mod skills;
 mod topics;
 pub use fake::{Fake, FakeSkills, FakeTopics};
 pub use skills::{place, Outcome, Progress, Refusal, SkillSpec, Skills, Target};
-pub use topics::{Snapshot, TopicSpec, Topics};
+pub use topics::{Frame, Snapshot, TopicSpec, Topics};
 
 /// A robot the door speaks for.
 #[async_trait]

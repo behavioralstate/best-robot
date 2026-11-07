@@ -471,6 +471,7 @@ polygon = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]
         TopicSpec {
             name: name.into(),
             description: "Numbers.".into(),
+            frames: false,
             message: json!({ "type": "object", "properties": properties }),
         }
     }

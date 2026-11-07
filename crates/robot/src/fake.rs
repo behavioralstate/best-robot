@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::{
-    Outcome, Pose, Progress, Robot, SkillSpec, Skills, Snapshot, State, Status, TopicSpec, Topics, Unreachable,
+    Frame, Outcome, Pose, Progress, Robot, SkillSpec, Skills, Snapshot, State, Status, TopicSpec, Topics, Unreachable,
 };
 
 /// A robot that answers with the state it was given: idle at the origin of `map`, fully charged, unless told
@@ -155,6 +155,7 @@ impl Skills for FakeSkills {
 pub struct FakeTopics {
     specs: Vec<TopicSpec>,
     latest: Mutex<HashMap<String, (Value, bool)>>,
+    frames: Mutex<HashMap<String, Frame>>,
 }
 
 impl FakeTopics {
@@ -162,7 +163,20 @@ impl FakeTopics {
         Self {
             specs,
             latest: Mutex::new(HashMap::new()),
+            frames: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Gives a topic of frames `bytes` in `format` as its latest image, arrived just now.
+    pub fn frame_now(&self, topic: &str, format: &str, bytes: &[u8]) {
+        self.frames.lock().unwrap().insert(
+            topic.into(),
+            Frame {
+                format: format.into(),
+                bytes: bytes.to_vec(),
+                received_at: SystemTime::now(),
+            },
+        );
     }
 
     pub fn with(self, topic: &str, message: Value) -> Self {
@@ -194,6 +208,10 @@ impl Topics for FakeTopics {
                 SystemTime::UNIX_EPOCH
             },
         })
+    }
+
+    fn frame(&self, topic: &str) -> Option<Frame> {
+        self.frames.lock().unwrap().get(topic).cloned()
     }
 }
 

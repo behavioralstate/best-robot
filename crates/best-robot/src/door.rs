@@ -1,6 +1,6 @@
 //! The door over a robot: best-peer's BEST surface, with this door's catalogue, its own approver and its data
-//! folder, the robot's skills behind the owner's guard and the owner's routes beside it, served on a listener the
-//! caller binds.
+//! folder, the robot's skills behind the owner's guard, and beside it the owner's routes and a camera's images, served
+//! on a listener the caller binds.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use crate::approver::OwnerApprover;
 use crate::guard::{envelope::Envelope, hold::Hold, Guard};
 use crate::owner::{self, Owner};
 use crate::settings::Settings;
-use crate::surface::{self, Parts};
+use crate::surface::{self, frames::Frames, Parts};
 
 /// The service key in the manifest, and the `source` of every event.
 const SERVICE: &str = "io.best.agents";
@@ -46,10 +46,14 @@ pub fn build(
         .flat_map(|s| s.skills().iter().map(|spec| spec.name.clone()))
         .collect();
     let description = surface::describe(&parts);
-    let catalogue = surface::catalogue(parts)?;
+    let frames = Frames::new(&settings.endpoint);
+    let catalogue = surface::catalogue(parts, &frames)?;
     let door = open(settings, &description, &scopes, catalogue).map_err(kept)?;
     let approver = Arc::new(LocalApprover::open(&settings.data).map_err(kept)?);
-    Ok((door, owner::routes(Owner { hold, guard, approver })))
+    Ok((
+        door,
+        owner::routes(Owner { hold, guard, approver }).merge(frames.routes()),
+    ))
 }
 
 /// The door over `catalogue`, described as `description`, its credentials approved for any of `scopes`, with what a
@@ -134,7 +138,14 @@ mod tests {
             skills: Some(skills.clone()),
             topics: None,
         };
-        let door = open(&settings, "test", &[], crate::surface::catalogue(parts).unwrap()).unwrap();
+        let frames = Frames::new(&settings.endpoint);
+        let door = open(
+            &settings,
+            "test",
+            &[],
+            crate::surface::catalogue(parts, &frames).unwrap(),
+        )
+        .unwrap();
         assert!(door.log.unfinished().is_empty());
         assert!(skills.goals().is_empty(), "the goal was not sent again");
         let filter = Filter {

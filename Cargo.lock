@@ -153,6 +153,7 @@ dependencies = [
  "rosbridge",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "time",
  "tokio",
@@ -1198,6 +1199,7 @@ name = "rosbridge"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "base64",
  "futures-util",
  "robot",
  "serde",
